@@ -308,11 +308,11 @@ class OpenPRHook(MainHook):
 
 
 class Main:
-    def __init__(self, args: ScriptArguments):
+    def __init__(self, args: ScriptArguments, *, log_path: Path | None = None):
         self.traj_dir = Path("trajectories") / Path(getuser()) / args.run_name
         self.traj_dir.mkdir(parents=True, exist_ok=True)
         timestamp = datetime.datetime.now().strftime("%y%m%d%H%M%S")
-        log_path = self.traj_dir / f"run-{timestamp}.log"
+        log_path = log_path if log_path is not None else self.traj_dir / f"run-{timestamp}.log"
         logger.info("Logging to %s", log_path)
         add_file_handler(log_path)
         if args.print_config:

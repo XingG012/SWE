@@ -1014,6 +1014,10 @@ def get_model(args: ModelArguments, commands: list[Command] | None = None):
         return BedrockModel(args, commands)
     elif args.model_name.startswith("ollama"):
         return OllamaModel(args, commands)
+    elif args.model_name == "deepseek-flash":
+        from sweagent.agent.deepseek_flash import DeepSeekFlashModel
+
+        return DeepSeekFlashModel(args, commands)
     elif args.model_name.startswith("deepseek"):
         return DeepSeekModel(args, commands)
     elif args.model_name in TogetherModel.SHORTCUTS:

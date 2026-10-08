@@ -6,6 +6,8 @@ from pathlib import PurePath
 
 from rich.logging import RichHandler
 
+from sweagent.utils.secrets import SecretFilter
+
 _SET_UP_LOGGERS = set()
 _ADDITIONAL_HANDLERS = []
 
@@ -38,6 +40,7 @@ def get_logger(name: str) -> logging.Logger:
         show_path=False,
     )
     handler.setLevel(_STREAM_LEVEL)
+    handler.addFilter(SecretFilter())
     logger.setLevel(min(_STREAM_LEVEL, _FILE_LEVEL))
     logger.addHandler(handler)
     logger.propagate = False
@@ -55,10 +58,20 @@ def add_file_handler(path: PurePath | str) -> None:
     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
     handler.setFormatter(formatter)
     handler.setLevel(_FILE_LEVEL)
+    handler.addFilter(SecretFilter())
     for name in _SET_UP_LOGGERS:
         logger = logging.getLogger(name)
         logger.addHandler(handler)
     _ADDITIONAL_HANDLERS.append(handler)
+
+
+def remove_file_handlers() -> None:
+    """Close per-run files before a batch starts its next independent task."""
+    for handler in _ADDITIONAL_HANDLERS:
+        for name in _SET_UP_LOGGERS:
+            logging.getLogger(name).removeHandler(handler)
+        handler.close()
+    _ADDITIONAL_HANDLERS.clear()
 
 
 default_logger = get_logger("swe-agent")

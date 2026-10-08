@@ -1,0 +1,1470 @@
+diff --git a/.dockerignore b/.dockerignore
+index 19f1c18..d364054 100644
+--- a/.dockerignore
++++ b/.dockerignore
+@@ -1,195 +1,5 @@
+-# Byte-compiled / optimized / DLL files
+-__pycache__/
+-*.py[cod]
+-*$py.class
+-
+-# C extensions
+-*.so
+-
+-# Distribution / packaging
+-.Python
+-build/
+-develop-eggs/
+-dist/
+-downloads/
+-eggs/
+-.eggs/
+-lib/
+-lib64/
+-parts/
+-sdist/
+-var/
+-wheels/
+-pip-wheel-metadata/
+-share/python-wheels/
+-*.egg-info/
+-.installed.cfg
+-*.egg
+-MANIFEST
+-
+-# PyInstaller
+-#  Usually these files are written by a python script from a template
+-#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+-*.manifest
+-*.spec
+-
+-# Installer logs
+-pip-log.txt
+-pip-delete-this-directory.txt
+-
+-# Unit test / coverage reports
+-htmlcov/
+-.tox/
+-.nox/
+-.coverage
+-.coverage.*
+-.cache
+-nosetests.xml
+-coverage.xml
+-*.cover
+-*.py,cover
+-.hypothesis/
+-.pytest_cache/
+-
+-# Translations
+-*.mo
+-*.pot
+-
+-# Django stuff:
+-*.log
+-local_settings.py
+-db.sqlite3
+-db.sqlite3-journal
+-
+-# Flask stuff:
+-instance/
+-.webassets-cache
+-
+-# Scrapy stuff:
+-.scrapy
+-
+-# Sphinx documentation
+-docs/_build/
+-
+-# PyBuilder
+-target/
+-
+-# Jupyter Notebook
+-.ipynb_checkpoints
+-
+-# IPython
+-profile_default/
+-ipython_config.py
+-
+-# pyenv
+-.python-version
+-
+-# pipenv
+-#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+-#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+-#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+-#   install all needed dependencies.
+-#Pipfile.lock
+-
+-# PEP 582; used by e.g. github.com/David-OConnor/pyflow
+-__pypackages__/
+-
+-# Celery stuff
+-celerybeat-schedule
+-celerybeat.pid
+-
+-# SageMath parsed files
+-*.sage.py
+-
+-# Environments
+-.env
+-.venv
+-env/
+-venv/
+-ENV/
+-env.bak/
+-venv.bak/
+-
+-# Spyder project settings
+-.spyderproject
+-.spyproject
+-
+-# Rope project settings
+-.ropeproject
+-
+-# mkdocs documentation
+-/site
+-
+-# mypy
+-.mypy_cache/
+-.dmypy.json
+-dmypy.json
+-
+-# Pyre type checker
+-.pyre/
+-
+-# Mac files
+-*.DS_Store
+-
+-# Custom
+-keys.cfg
+-
+-# iPython Notebooks
+-*.ipynb
+-
+-# Evaluation folders
+-results/
+-testbed/
+-temp/
+-
+-# Ignore all YAML files in data/
+-data/*/ic-*
+-data/*/single-issues
+-
+-# Fine tuning data
+-fine_tune/*.ipynb
+-fine_tune/subtasks/*.jsonl
+-temp*.jsonl
+-
+-# Inspector
+-inspector/*.json
+-
+-# Ignore all files in the private folder
+-private/
+-
+-### Website
+-
+-# dependencies
+-website/frontend/node_modules
+-website/frontend/package-lock.json
+-website/frontend/.pnp
+-*.pnp.js
+-
+-# testing
+-website/frontend/coverage
+-
+-# production
+-website/frontend/build
+-
+-# misc
+-*.env.local
+-*.env.development.local
+-*.env.test.local
+-*.env.production.local
+-.api_key
+-*npm-debug.log*
+-*yarn-debug.log*
+-*yarn-error.log*
+-
+-
+-# demo yamls (for editing)
+-*.demo.yaml
+-
+-# trajectory files
+-trajectories/**
+-!trajectories/demonstrations/**
+-
+-.vscode/**
+-
+-# PyCharm
+-.idea/
++# The official EnIGMA Dockerfile copies only files under docker/.
++# Keep all project credentials, logs, datasets and documents out of build context.
++**
++!docker/
++!docker/**
+diff --git a/.gitignore b/.gitignore
+index 2a834fc..681bb87 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -197,3 +197,13 @@ data/**
+ # Disasm / Decomp output
+ *.decomp.json
+ *.disas.json
++
++# EnIGMA reproduction: local dependencies, credentials and generated results
++.venv-enigma/
++.secrets/
++enigma_reproduction/generated/
++logs/
++*.doc
++*.docx
++logs_baseline/
++logs_dcipher*/
+diff --git a/run.py b/run.py
+index 16669d2..ef1bbf0 100644
+--- a/run.py
++++ b/run.py
+@@ -308,11 +308,11 @@ class OpenPRHook(MainHook):
+ 
+ 
+ class Main:
+-    def __init__(self, args: ScriptArguments):
++    def __init__(self, args: ScriptArguments, *, log_path: Path | None = None):
+         self.traj_dir = Path("trajectories") / Path(getuser()) / args.run_name
+         self.traj_dir.mkdir(parents=True, exist_ok=True)
+         timestamp = datetime.datetime.now().strftime("%y%m%d%H%M%S")
+-        log_path = self.traj_dir / f"run-{timestamp}.log"
++        log_path = log_path if log_path is not None else self.traj_dir / f"run-{timestamp}.log"
+         logger.info("Logging to %s", log_path)
+         add_file_handler(log_path)
+         if args.print_config:
+diff --git a/sweagent/agent/agents.py b/sweagent/agent/agents.py
+index dccc916..6542a9a 100644
+--- a/sweagent/agent/agents.py
++++ b/sweagent/agent/agents.py
+@@ -271,6 +271,9 @@ class Agent:
+         self.summarizer_model = get_model(
+             args.config.summarizer_config.model if args.config.summarizer_config.model is not None else args.model
+         )
++        if getattr(self.summarizer_model, "strict_accounting", False):
++            self.summarizer_model.budget_source = self.model
++            self.summarizer_model.accounting_role = "summarizer"
+         self.config = args.config
+         assert self.config is not None  # mypy
+         self.system_args = {
+@@ -944,9 +947,20 @@ class Agent:
+             for hook in self.hooks:
+                 hook.on_sub_action_started(sub_action=sub_action)
+             observation, _, done, _info = self._env.step(sub_action["action"])
+-            observation, additional_cost = self.config.summarizer_config.function(  # type: ignore
+-                sub_action["action"], observation, self._env, self.summarizer_model
+-            )
++            try:
++                observation, additional_cost = self.config.summarizer_config.function(  # type: ignore
++                    sub_action["action"], observation, self._env, self.summarizer_model
++                )
++            except (CostLimitExceededError, RuntimeError) as e:
++                if not getattr(self.summarizer_model, "strict_accounting", False):
++                    raise
++                self._update_summarizer_stats(self.summarizer_model.stats)
++                self.summarizer_model.reset_stats(APIStats())
++                self.logger.warning("Summarizer stopped: %s", e)
++                status = "exit_cost" if isinstance(e, CostLimitExceededError) else "exit_error"
++                observation, _, done, _info = self._env.step(status)
++                self.info.update(_info)
++                return observation, done
+             self._update_summarizer_stats(additional_cost)
+             self.info.update(_info)
+             for hook in self.hooks:
+diff --git a/sweagent/agent/models.py b/sweagent/agent/models.py
+index d0f5765..7ef7304 100644
+--- a/sweagent/agent/models.py
++++ b/sweagent/agent/models.py
+@@ -1014,6 +1014,10 @@ def get_model(args: ModelArguments, commands: list[Command] | None = None):
+         return BedrockModel(args, commands)
+     elif args.model_name.startswith("ollama"):
+         return OllamaModel(args, commands)
++    elif args.model_name == "deepseek-flash":
++        from sweagent.agent.deepseek_flash import DeepSeekFlashModel
++
++        return DeepSeekFlashModel(args, commands)
+     elif args.model_name.startswith("deepseek"):
+         return DeepSeekModel(args, commands)
+     elif args.model_name in TogetherModel.SHORTCUTS:
+diff --git a/sweagent/agent/summarizer.py b/sweagent/agent/summarizer.py
+index 3c06d8b..df54875 100644
+--- a/sweagent/agent/summarizer.py
++++ b/sweagent/agent/summarizer.py
+@@ -30,7 +30,7 @@ class SummarizerConfig(FrozenSerializable):
+     def __post_init__(self):
+         object.__setattr__(self, "function", SummarizeFunction.get(self.function, self.window_length))  # type: ignore
+         if isinstance(self.model, dict):
+-            object.__setattr__(self, "model", ModelArguments.from_dict(self.summarizer_model))  # type: ignore
++            object.__setattr__(self, "model", ModelArguments.from_dict(self.model))  # type: ignore
+ 
+ 
+ # ABSTRACT BASE CLASSES
+@@ -196,6 +196,7 @@ class LMSummarizer(SummarizeFunction):
+ 
+     def setup(self, instance_args: dict[str, Any], config):
+         self.name = "ctf_summarizer"
++        self.history = []
+         self.system_args = config.__dict__
+         self.system_args.update({f"summarizer_{k}": v for k, v in config.summarizer_config.__dict__.items()})
+         system_msg = config.summarizer_config.system_template.format(**self.system_args)
+@@ -205,6 +206,7 @@ class LMSummarizer(SummarizeFunction):
+         self.instance_args = instance_args
+ 
+     def __call__(self, input: str, observation: str, env: SWEEnv, model: BaseModel) -> tuple[str, APIStats]:
++        history_length = len(self.history)
+         try:
+             if (
+                 any(input.startswith(s) for s in self.block_list_input)
+@@ -238,7 +240,11 @@ class LMSummarizer(SummarizeFunction):
+                 self._warning_message_summarization_failed.format(command_file_name=command_file_name)
+             ), APIStats()
+         except Exception:
++            if getattr(model, "strict_accounting", False):
++                raise
+             self.logger.warning(
+                 f"Unhandled exception occurred when trying to summarize observation for input {input}: {traceback.format_exc()}"
+             )
+             return observation, APIStats()
++        finally:
++            del self.history[history_length:]
+diff --git a/sweagent/environment/utils.py b/sweagent/environment/utils.py
+index e0a9443..b6b5b30 100644
+--- a/sweagent/environment/utils.py
++++ b/sweagent/environment/utils.py
+@@ -26,6 +26,7 @@ import docker.types
+ from docker.models.containers import Container
+ from sweagent.utils.config import keys_config
+ from sweagent.utils.log import get_logger
++from sweagent.utils.secrets import credential_free_environment
+ 
+ DOCKER_START_UP_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 1))
+ DOCKER_COMPOSE_TERMINATION_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 100))
+@@ -430,6 +431,7 @@ def get_docker_compose(docker_compose_path: Path) -> Path:
+     logger.debug("Starting docker-compose with command: %s", shlex.join(startup_cmd))
+     compose = subprocess.Popen(
+         startup_cmd,
++        env=credential_free_environment(),
+         stdin=PIPE,
+         stdout=PIPE,
+         stderr=STDOUT,
+@@ -620,6 +622,12 @@ def image_exists(image_name: str) -> bool:
+             raise RuntimeError(msg) from e
+         raise
+     filterred_images = client.images.list(filters={"reference": image_name})
++    if len(filterred_images) == 0 and (image_name.startswith("sha256:") or "@sha256:" in image_name):
++        # Docker reference filters match tags, not immutable content IDs.
++        try:
++            filterred_images = [client.images.get(image_name)]
++        except docker.errors.ImageNotFound:
++            return False
+     if len(filterred_images) == 0:
+         return False
+     elif len(filterred_images) > 1:
+diff --git a/sweagent/utils/config.py b/sweagent/utils/config.py
+index 1487cd9..5e702c8 100644
+--- a/sweagent/utils/config.py
++++ b/sweagent/utils/config.py
+@@ -47,7 +47,7 @@ class Config:
+                 msg = f"Error loading keys.cfg from {keys_cfg_path}. Please check the file."
+                 raise RuntimeError(msg) from e
+         else:
+-            logger.error(f"keys.cfg not found in {PACKAGE_DIR}")
++            logger.debug("No optional keys.cfg found; credentials are read from environment variables")
+ 
+     def get(self, key: str, default=None, choices: list[Any] | None = None) -> Any:
+         """Get a key from environment variables or keys.cfg.
+diff --git a/sweagent/utils/log.py b/sweagent/utils/log.py
+index fd9bb5a..07d072f 100644
+--- a/sweagent/utils/log.py
++++ b/sweagent/utils/log.py
+@@ -6,6 +6,8 @@ from pathlib import PurePath
+ 
+ from rich.logging import RichHandler
+ 
++from sweagent.utils.secrets import SecretFilter
++
+ _SET_UP_LOGGERS = set()
+ _ADDITIONAL_HANDLERS = []
+ 
+@@ -38,6 +40,7 @@ def get_logger(name: str) -> logging.Logger:
+         show_path=False,
+     )
+     handler.setLevel(_STREAM_LEVEL)
++    handler.addFilter(SecretFilter())
+     logger.setLevel(min(_STREAM_LEVEL, _FILE_LEVEL))
+     logger.addHandler(handler)
+     logger.propagate = False
+@@ -55,10 +58,20 @@ def add_file_handler(path: PurePath | str) -> None:
+     formatter = logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+     handler.setFormatter(formatter)
+     handler.setLevel(_FILE_LEVEL)
++    handler.addFilter(SecretFilter())
+     for name in _SET_UP_LOGGERS:
+         logger = logging.getLogger(name)
+         logger.addHandler(handler)
+     _ADDITIONAL_HANDLERS.append(handler)
+ 
+ 
++def remove_file_handlers() -> None:
++    """Close per-run files before a batch starts its next independent task."""
++    for handler in _ADDITIONAL_HANDLERS:
++        for name in _SET_UP_LOGGERS:
++            logging.getLogger(name).removeHandler(handler)
++        handler.close()
++    _ADDITIONAL_HANDLERS.clear()
++
++
+ default_logger = get_logger("swe-agent")
+diff --git a/sweagent/agent/deepseek_flash.py b/sweagent/agent/deepseek_flash.py
+new file mode 100644
+index 0000000..d46a970
+--- /dev/null
++++ b/sweagent/agent/deepseek_flash.py
+@@ -0,0 +1,147 @@
++"""OpenAI-compatible Flash adapter; retain v0.7 message construction and ACI."""
++from __future__ import annotations
++
++import json
++import logging
++import math
++import os
++import time
++from datetime import datetime, timezone
++from pathlib import Path
++
++from openai import BadRequestError, OpenAI
++
++from sweagent import REPO_ROOT
++from sweagent.agent.models import ContextWindowExceededError, CostLimitExceededError, OpenAIModel
++from sweagent.utils.config import keys_config
++from sweagent.utils.secrets import redact, register_secret
++
++
++class DeepSeekFlashModel(OpenAIModel):
++    MODELS = {"deepseek-flash": {"max_context": 1_000_000,
++              "cost_per_input_token": 0.3 / 1_000_000,
++              "cost_per_output_token": 1.2 / 1_000_000}}
++    SHORTCUTS = {}
++    strict_accounting = True
++
++    def _setup_client(self):
++        self.settings = json.loads((REPO_ROOT / "enigma_reproduction/settings.json").read_text())
++        self.pricing = self.settings["pricing"]
++        if self.pricing["unit"] != "per_million_tokens" or self.pricing["currency"] != "USD":
++            raise ValueError("Flash pricing must be specified in USD per million tokens")
++        for tier in ("peak", "off_peak"):
++            if any(not isinstance(v, (int, float)) or not math.isfinite(v) or v <= 0
++                   for v in self.pricing[tier].values()):
++                raise ValueError("Flash pricing must be finite and strictly positive")
++            if set(self.pricing[tier]) != {"cache_hit", "cache_miss", "output"}:
++                raise ValueError("Incomplete Flash pricing")
++        base_url = keys_config.get("DEEPSEEK_API_BASE_URL", self.settings["base_url"])
++        if base_url.rstrip("/") != "https://api.deepseek.com":
++            raise ValueError("This reproduction only permits the official DeepSeek endpoint")
++        key = keys_config["DEEPSEEK_API_KEY"]
++        if not isinstance(key, str) or not key.strip():
++            raise ValueError("Missing DeepSeek credential")
++        register_secret(key)
++        for name in ("openai", "openai._base_client", "httpx", "httpcore"):
++            logging.getLogger(name).setLevel(logging.CRITICAL)
++            logging.getLogger(name).disabled = True
++        self.client = OpenAI(api_key=key, base_url=base_url, max_retries=0, timeout=120.0)
++        self.budget_source = None
++        self.accounting_role = "primary"
++
++    def _check_budget(self):
++        instance_cost = self.stats.instance_cost
++        total_cost = self.stats.total_cost
++        if self.budget_source is not None:
++            instance_cost += self.budget_source.stats.instance_cost
++            total_cost += self.budget_source.stats.total_cost
++        if (0 < self.args.per_instance_cost_limit <= instance_cost or
++                0 < self.args.total_cost_limit <= total_cost):
++            raise CostLimitExceededError("Combined primary and summarizer cost limit reached")
++
++    def _ledger(self, data):
++        path = Path(os.getenv("ENIGMA_USAGE_LEDGER", str(REPO_ROOT / "results/enigma/usage.jsonl")))
++        path.parent.mkdir(parents=True, exist_ok=True)
++        record = {"timestamp_utc": datetime.now(timezone.utc).isoformat(),
++                  "model": self.api_model, "role": self.accounting_role,
++                  "pricing_verified_date": self.pricing["verified_date"], **data}
++        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
++        with os.fdopen(fd, "a") as f:
++            f.write(json.dumps(record, ensure_ascii=False) + "\n")
++
++    @staticmethod
++    def _integer(value):
++        return isinstance(value, int) and not isinstance(value, bool) and value >= 0
++
++    def query(self, history):
++        self._check_budget()
++        messages = self.history_to_messages(history)
++        if any(redact(item["content"]) != item["content"] for item in messages):
++            raise RuntimeError("Credential-like content detected in model input; request blocked")
++        started = time.perf_counter()
++        try:
++            response = self.client.chat.completions.create(
++                messages=messages, model=self.api_model,
++                temperature=self.args.temperature, top_p=self.args.top_p,
++                max_tokens=self.settings["max_output_tokens"],
++                extra_body={"thinking": {"type": self.settings["thinking"]}},
++            )
++        except BadRequestError as e:
++            # Never expose server bodies, headers, request objects or exception chains.
++            self._ledger({"accounting_complete": False, "error": "BadRequestError",
++                          "latency_seconds": time.perf_counter() - started,
++                          "cost_upper_usd": None})
++            if getattr(e, "code", None) == "context_length_exceeded":
++                raise ContextWindowExceededError("Flash context limit exceeded") from None
++            raise RuntimeError("Flash request rejected; accounting incomplete, no automatic retry") from None
++        except Exception as e:
++            self._ledger({"accounting_complete": False, "error": type(e).__name__,
++                          "latency_seconds": time.perf_counter() - started,
++                          "cost_upper_usd": None})
++            raise RuntimeError("Flash API request failed; accounting incomplete, no automatic retry") from None
++
++        usage = getattr(response, "usage", None)
++        prompt = getattr(usage, "prompt_tokens", None)
++        completion = getattr(usage, "completion_tokens", None)
++        if not self._integer(prompt) or not self._integer(completion) or prompt + completion <= 0:
++            self._ledger({"accounting_complete": False, "error": "MissingOrInvalidUsage",
++                          "cost_upper_usd": None})
++            raise RuntimeError("Flash returned no valid usage; cannot estimate cost, stopping")
++        hit = getattr(usage, "prompt_cache_hit_tokens", None)
++        if hit is None:
++            hit = getattr(getattr(usage, "prompt_tokens_details", None), "cached_tokens", 0)
++        if not self._integer(hit) or hit > prompt:
++            self._ledger({"accounting_complete": False, "error": "InvalidCacheUsage",
++                          "cost_upper_usd": None})
++            raise RuntimeError("Flash cache usage invalid; stopping")
++        miss = prompt - hit
++        reported_miss = getattr(usage, "prompt_cache_miss_tokens", miss)
++        if reported_miss != miss:
++            self._ledger({"accounting_complete": False, "error": "InconsistentCacheUsage",
++                          "cost_upper_usd": None})
++            raise RuntimeError("Flash cache usage inconsistent; stopping")
++        costs = {tier: (hit * rates["cache_hit"] + miss * rates["cache_miss"] +
++                       completion * rates["output"]) / 1_000_000
++                 for tier, rates in ((t, self.pricing[t]) for t in ("peak", "off_peak"))}
++        # completion_tokens includes reasoning tokens. Do not add them a second time.
++        self.stats.total_cost += costs["peak"]
++        self.stats.instance_cost += costs["peak"]
++        self.stats.tokens_sent += prompt
++        self.stats.tokens_received += completion
++        self.stats.api_calls += 1
++        latency = time.perf_counter() - started
++        self._ledger({"accounting_complete": True, "response_model": redact(str(response.model)),
++                      "latency_seconds": latency,
++                      "finish_reason": redact(str(response.choices[0].finish_reason)),
++                      "messages_count": len(messages),
++                      "input_characters": sum(len(m["content"]) for m in messages),
++                      "output_characters": len(response.choices[0].message.content or ""),
++                      "output_tokens_per_second": completion / latency if latency > 0 else None,
++                      "prompt_tokens": prompt, "cache_hit_tokens": hit, "cache_miss_tokens": miss,
++                      "completion_tokens": completion,
++                      "cost_upper_usd": costs["peak"], "cost_lower_usd": costs["off_peak"]})
++        self._check_budget()
++        content = response.choices[0].message.content
++        if not isinstance(content, str) or not content.strip():
++            raise RuntimeError("Flash returned empty content; usage charged, stopping")
++        return redact(content)
+diff --git a/sweagent/utils/secrets.py b/sweagent/utils/secrets.py
+new file mode 100644
+index 0000000..4831a55
+--- /dev/null
++++ b/sweagent/utils/secrets.py
+@@ -0,0 +1,46 @@
++"""Redact credentials before formatting logs or accepting model output."""
++from __future__ import annotations
++
++import logging
++import os
++import re
++import traceback
++
++_SECRETS: set[str] = set()
++_TOKEN = re.compile(r"\bsk-[A-Za-z0-9_-]{12,}|\b(?:ghp_|github_pat_)[A-Za-z0-9_]+")
++_AUTH = re.compile(r"(?i)(authorization\s*[:=]\s*)([^\r\n]+)")
++
++
++def register_secret(value: str) -> None:
++    if value:
++        _SECRETS.add(value)
++
++
++def credential_free_environment() -> dict[str, str]:
++    """Docker Compose interpolation must not inherit model credentials."""
++    return {name: value for name, value in os.environ.items()
++            if not any(word in name.upper() for word in ("API_KEY", "TOKEN", "SECRET", "PASSWORD"))}
++
++
++def redact(text: str) -> str:
++    for name, value in os.environ.items():
++        if value and any(word in name.upper() for word in ("API_KEY", "TOKEN", "SECRET", "PASSWORD")):
++            text = text.replace(value, "[REDACTED]")
++    for value in _SECRETS:
++        text = text.replace(value, "[REDACTED]")
++    text = _TOKEN.sub("[REDACTED]", text)
++    return _AUTH.sub(r"\1[REDACTED]", text)
++
++
++class SecretFilter(logging.Filter):
++    def filter(self, record: logging.LogRecord) -> bool:
++        text = record.getMessage()
++        if record.exc_info:
++            text += "\n" + "".join(traceback.format_exception(*record.exc_info))
++            record.exc_info = None
++            record.exc_text = None
++        record.msg = redact(text)
++        record.args = ()
++        if record.stack_info:
++            record.stack_info = redact(record.stack_info)
++        return True
+diff --git a/enigma_reproduction/settings.json b/enigma_reproduction/settings.json
+new file mode 100644
+index 0000000..1261d20
+--- /dev/null
++++ b/enigma_reproduction/settings.json
+@@ -0,0 +1,26 @@
++{
++  "upstream_commit": "084d5d164729ddcbe8fbc05877ead403549ef669",
++  "dataset_root": "/home/xing/.nyuctf/v20250206",
++  "dataset_manifest": "test_dataset.json",
++  "model": "deepseek-flash",
++  "base_url": "https://api.deepseek.com",
++  "image": "sweagent/enigma@sha256:59353332506b31afc3483b093e0d5bcbc5e8194cb30b78bc5397f3d3582cb410",
++  "thinking": "disabled",
++  "temperature": 0.0,
++  "top_p": 0.95,
++  "max_output_tokens": 4096,
++  "per_instance_cost_limit": 0.4,
++  "pilot_per_instance_cost_limit": 0.4,
++  "pilot_total_cost_limit": 1.2,
++  "pilot_ids": ["2017q-cry-another_xor", "2019q-rev-beleaf", "2018q-msc-short_circuit"],
++  "pricing": {
++    "currency": "USD",
++    "unit": "per_million_tokens",
++    "verified_date": "2026-10-08",
++    "source": "https://api-docs.deepseek.com/quick_start/pricing/",
++    "accounting": "peak_rate_upper_bound",
++    "peak": {"cache_hit": 0.006, "cache_miss": 0.3, "output": 1.2},
++    "off_peak": {"cache_hit": 0.003, "cache_miss": 0.15, "output": 0.6},
++    "max_context": 1000000
++  }
++}
+diff --git a/enigma_reproduction/constraints.txt b/enigma_reproduction/constraints.txt
+new file mode 100644
+index 0000000..caad0c9
+--- /dev/null
++++ b/enigma_reproduction/constraints.txt
+@@ -0,0 +1,6 @@
++# Compatibility of official SWE-agent v0.7 / swebench 2.x imports.
++openai>=1,<2
++anthropic>=0.34,<1
++together>=1.1,<2
++groq>=0.9,<1
++modal>=0.64,<0.65
+diff --git a/enigma_reproduction/run_nyu.py b/enigma_reproduction/run_nyu.py
+new file mode 100644
+index 0000000..ac9a7f3
+--- /dev/null
++++ b/enigma_reproduction/run_nyu.py
+@@ -0,0 +1,320 @@
++#!/usr/bin/env python3
++"""Prepare, check and run NYU EnIGMA using the unchanged category configurations."""
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import math
++import os
++import statistics
++import subprocess
++import sys
++import time
++from collections import Counter
++from datetime import datetime, timezone
++from pathlib import Path
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT))
++SETTINGS = json.loads((ROOT / "enigma_reproduction/settings.json").read_text())
++GENERATED = ROOT / "enigma_reproduction/generated"
++CATEGORIES = {"crypto", "forensics", "misc", "pwn", "rev", "web"}
++os.environ["TOGETHER_NO_BANNER"] = "1"
++os.environ.pop("OPENAI_LOG", None)
++os.environ.setdefault("SWE_AGENT_LOG_STREAM_LEVEL", "INFO")
++os.environ.setdefault("SWE_AGENT_LOG_FILE_LEVEL", "INFO")
++
++
++def sha(path):
++    return hashlib.sha256(path.read_bytes()).hexdigest()
++
++
++def dataset():
++    root = Path(SETTINGS["dataset_root"]).resolve(strict=True)
++    manifest = root / SETTINGS["dataset_manifest"]
++    data = json.loads(manifest.read_text())
++    records = []
++    for identifier, meta in data.items():
++        directory = (root / meta["path"]).resolve(strict=True)
++        if not directory.is_relative_to(root / "test") or meta["category"] not in CATEGORIES:
++            raise ValueError("Only NYU test challenges from the six official categories are permitted")
++        challenge_path = directory / "challenge.json"
++        challenge = json.loads(challenge_path.read_text())
++        if challenge["category"] != meta["category"]:
++            raise ValueError("Manifest and challenge categories differ")
++        missing = []
++        for filename in challenge.get("files", []):
++            file = (directory / filename).resolve()
++            if not file.is_relative_to(directory) or file.name in {"challenge.json", "keys.cfg"}:
++                raise ValueError("Invalid challenge attachment path")
++            if not file.exists():
++                missing.append(filename)
++        records.append({"id": identifier, "name": challenge["name"],
++                        "category": meta["category"], "path": str(directory),
++                        "challenge_sha256": sha(challenge_path),
++                        "missing_attachments": missing,
++                        "config": f"config/ctf/ctf_{meta['category']}.yaml"})
++    return records, {"path": str(root), "manifest_sha256": sha(manifest),
++                     "count": len(records), "categories": dict(Counter(r["category"] for r in records))}
++
++
++def prepare():
++    records, inventory = dataset()
++    GENERATED.mkdir(parents=True, exist_ok=True)
++    reference_paths = list((ROOT / "config/ctf").glob("ctf_*.yaml"))
++    reference_paths += list((ROOT / "config/commands").glob("*"))
++    reference_paths += list((ROOT / "trajectories/demonstrations/ctf").rglob("*.traj"))
++    reference_paths += [ROOT / "docker/enigma.Dockerfile", ROOT / "docker/ctf_requirements.txt"]
++    inventory["reference_sha256"] = {str(p.relative_to(ROOT)): sha(p) for p in reference_paths if p.is_file()}
++    inventory["records"] = records
++    (GENERATED / "inventory.json").write_text(json.dumps(inventory, indent=2, ensure_ascii=False) + "\n")
++    print(json.dumps({k: inventory[k] for k in ("path", "count", "categories")}, ensure_ascii=False))
++    return records
++
++
++def credential_path():
++    return ROOT / ".secrets/deepseek_api_key"
++
++
++def check_credential():
++    if os.environ.get("DEEPSEEK_API_KEY", "").strip():
++        return True
++    path = credential_path()
++    return path.is_file() and path.stat().st_mode & 0o077 == 0 and bool(path.read_text().strip())
++
++
++def preflight(image):
++    problems = []
++    version = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
++    if version.stdout.strip() != SETTINGS["upstream_commit"]:
++        problems.append("项目 HEAD 不是固定的官方 v0.7 commit")
++    if not check_credential():
++        problems.append("未加载 DEEPSEEK_API_KEY，或 .secrets/deepseek_api_key 不存在/权限不是私密")
++    resolved_image = None
++    try:
++        import docker
++        client = docker.from_env(timeout=5)
++        client.ping()
++        try:
++            obj = client.images.get(image)
++            # A local image ID is immutable; no mutable latest tag reaches the solver.
++            resolved_image = obj.id
++        except docker.errors.ImageNotFound:
++            problems.append("未找到 EnIGMA 镜像；需拉取官方镜像或按官方 Dockerfile 构建")
++        client.close()
++    except Exception:
++        problems.append("当前执行环境无法连接 Docker daemon，不能启动论文解题容器")
++    try:
++        import sweagent
++        from sweagent.agent.agents import AgentArguments
++        from sweagent.agent.models import ModelArguments
++        if sweagent.__version__ != "0.7.0":
++            problems.append("Python 导入的不是 SWE-agent 0.7.0")
++        for category in sorted(CATEGORIES):
++            args = AgentArguments(model=ModelArguments(model_name="deepseek-flash"),
++                                  config_file=ROOT / f"config/ctf/ctf_{category}.yaml")
++            if args.config.summarizer_config.function.__class__.__name__ != "LMSummarizer":
++                problems.append("官方类别配置的摘要模块不符合完整 EnIGMA")
++            for demo in args.config.demonstrations:
++                if not Path(demo).is_file():
++                    problems.append("官方类别示例缺失")
++    except Exception as e:
++        problems.append(f"Python 依赖或官方配置导入失败（{type(e).__name__}）")
++    report = {"ready": not problems, "blockers": problems, "resolved_image": resolved_image,
++              "model_calls_made": 0}
++    GENERATED.mkdir(parents=True, exist_ok=True)
++    (GENERATED / "preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
++    print(json.dumps(report, ensure_ascii=False))
++    return report
++
++
++def usage_summary(path):
++    rows = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
++    complete = all(row.get("accounting_complete") is True for row in rows)
++    prompt = sum(row.get("prompt_tokens", 0) for row in rows)
++    completion = sum(row.get("completion_tokens", 0) for row in rows)
++    hit = sum(row.get("cache_hit_tokens", 0) for row in rows)
++    known_upper = sum(row["cost_upper_usd"] for row in rows if row["accounting_complete"])
++    known_lower = sum(row["cost_lower_usd"] for row in rows if row["accounting_complete"])
++    return {"accounting_complete": complete, "api_calls": len(rows),
++            "prompt_tokens": prompt, "completion_tokens": completion, "cache_hit_tokens": hit,
++            "cache_hit_ratio": hit / prompt if prompt else None,
++            "api_latency_seconds": sum(row.get("latency_seconds", 0) for row in rows),
++            "cost_upper_usd": known_upper if complete else None,
++            "cost_lower_usd": known_lower if complete else None,
++            "known_cost_upper_usd": known_upper, "known_cost_lower_usd": known_lower,
++            "by_role": {role: {"api_calls": sum(row["role"] == role for row in rows),
++                       "cost_upper_usd": sum(row["cost_upper_usd"] for row in rows
++                                              if row["role"] == role and row["accounting_complete"])}
++                        for role in ("primary", "summarizer")}}
++
++
++def pilot(records, image, per_instance, total, identifiers, label="pilot"):
++    report = preflight(image)
++    if not report["ready"]:
++        return 2
++    if not os.environ.get("DEEPSEEK_API_KEY"):
++        os.environ["DEEPSEEK_API_KEY"] = credential_path().read_text().strip()
++    # Do not import any Ours module, config, log or prompt.
++    from run import ActionsArguments, Main, ScriptArguments
++    from sweagent.agent.agents import AgentArguments
++    from sweagent.agent.models import ModelArguments
++    from sweagent.environment.swe_env import EnvironmentArguments
++    from sweagent.utils.secrets import redact
++    from sweagent.utils.log import get_logger, remove_file_handlers
++    from enigma_reproduction.metrics import StepMetrics
++    from enigma_reproduction.task_log import TaskLog
++    import docker
++
++    lookup = {row["id"]: row for row in records}
++    if len(set(identifiers)) != len(identifiers) or any(i not in lookup for i in identifiers):
++        raise ValueError("Pilot IDs must be unique members of the NYU test manifest")
++    if any(lookup[i]["missing_attachments"] for i in identifiers):
++        raise ValueError("A selected pilot challenge has missing attachments")
++    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
++    directory = GENERATED / f"{label}-{stamp}"
++    directory.mkdir(mode=0o700)
++    (directory / "run_config.json").write_text(json.dumps({
++        "upstream_commit": SETTINGS["upstream_commit"], "settings": SETTINGS,
++        "resolved_image": report["resolved_image"], "selected_ids": identifiers,
++        "per_instance_cost_limit": per_instance, "total_cost_limit": total,
++        "inventory_sha256": sha(GENERATED / "inventory.json")}, indent=2) + "\n")
++    results = []
++    spent = 0.0
++    client = docker.from_env(timeout=5)
++    if not client.networks.list(names=["ctfnet"]):
++        client.networks.create("ctfnet")
++    client.close()
++    for identifier in identifiers:
++        remaining = total - spent
++        if remaining <= 0:
++            break
++        row = lookup[identifier]
++        ledger = directory / f"{identifier}-usage.jsonl"
++        os.environ["ENIGMA_USAGE_LEDGER"] = str(ledger)
++        args = ScriptArguments(
++            environment=EnvironmentArguments(data_path=str(Path(row["path"]) / "challenge.json"),
++                repo_path=row["path"], base_commit="nyu-test-local", image_name=report["resolved_image"],
++                install_environment=False, verbose=False, container_mounts=[]),
++            agent=AgentArguments(model=ModelArguments(model_name="deepseek-flash",
++                per_instance_cost_limit=min(per_instance, remaining), total_cost_limit=remaining,
++                temperature=SETTINGS["temperature"], top_p=SETTINGS["top_p"]),
++                config_file=ROOT / row["config"]),
++            actions=ActionsArguments(open_pr=False, apply_patch_locally=False),
++            ctf=True, skip_existing=False, print_config=False, raise_exceptions=True,
++            suffix=f"{label}-{stamp}-{identifier}",
++        )
++        task_log = TaskLog(ROOT / "logs", model=SETTINGS["model"], name=row["name"],
++                           identifier=identifier, category=row["category"], budget=min(per_instance, remaining))
++        main = None
++        metrics = StepMetrics(directory / f"{identifier}-steps.jsonl",
++                              process_logger=get_logger("enigma-task-process"))
++        started = time.perf_counter()
++        result = {"id": identifier, "name": row["name"], "category": row["category"], "solved": False,
++                  "exit_status": "interrupted", "log_file": str(task_log.path),
++                  "usage_ledger": str(ledger), "step_metrics": str(metrics.path),
++                  "per_instance_cost_limit_usd": min(per_instance, remaining)}
++        try:
++            main = Main(args, log_path=task_log.path)
++            result["initialization_seconds"] = time.perf_counter() - started
++            main.agent.add_hook(metrics)
++            main.run(0)
++            result["exit_status"] = main.agent.info.get("exit_status")
++            # The official env assigns 'submitted' only after validate_submission succeeds.
++            result["solved"] = result["exit_status"] == "submitted"
++            result["trajectory_dir"] = str(main.traj_dir)
++        except Exception as e:
++            result["exit_status"] = "infrastructure_error"
++            result["error_type"] = type(e).__name__
++            result["error_message"] = redact(str(e))
++            print(redact(f"Trial stopped: {type(e).__name__}: {e}"))
++        finally:
++            if main is not None:
++                for resource in (main.env, main.agent.model.client, main.agent.summarizer_model.client):
++                    try:
++                        resource.close()
++                    except Exception as e:
++                        result.setdefault("cleanup_errors", []).append(redact(f"{type(e).__name__}: {e}"))
++            remove_file_handlers()
++            result.update(usage_summary(ledger))
++            result.update({"wall_seconds": time.perf_counter() - started, "steps": metrics.steps,
++                           "tool_counts": dict(metrics.tools),
++                           "action_and_summary_seconds": metrics.action_and_summary_seconds})
++            task_log.finalize(result)
++        spent += result["known_cost_upper_usd"]
++        results.append(result)
++        (directory / "results.json").write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
++        print(json.dumps(result, ensure_ascii=False))
++        if not result["accounting_complete"] or result["exit_status"] in {"infrastructure_error", "exit_error"}:
++            break
++    solved_costs = [r["cost_upper_usd"] for r in results if r["solved"] and r["accounting_complete"]]
++    valid = [r for r in results if r["accounting_complete"] and r["exit_status"] != "infrastructure_error"]
++    summary = {"attempted": len(results), "solved": len(solved_costs),
++               "selected_count": len(identifiers),
++               "valid_attempted": len(valid),
++               "coverage": len(valid) / len(identifiers),
++               "success_rate_on_valid_attempted": len(solved_costs) / len(valid) if valid else None,
++               "full_test_pass_at_1": len(solved_costs) / 200
++                   if label == "run" and len(valid) == len(identifiers) == 200 else None,
++               "accounting_complete": all(r["accounting_complete"] for r in results),
++               "cost_upper_usd": spent if all(r["accounting_complete"] for r in results) else None,
++               "known_cost_upper_usd": spent, "cost_is_peak_rate_upper_bound": True,
++               "cost_lower_usd": sum(r["known_cost_lower_usd"] for r in results)
++                   if all(r["accounting_complete"] for r in results) else None,
++               "total_api_calls": sum(r["api_calls"] for r in results),
++               "total_prompt_tokens": sum(r["prompt_tokens"] for r in results),
++               "total_completion_tokens": sum(r["completion_tokens"] for r in results),
++               "exit_status_counts": dict(Counter(r["exit_status"] for r in results)),
++               "by_category": {cat: {"attempted": sum(r["category"] == cat for r in results),
++                    "solved": sum(r["category"] == cat and r["solved"] for r in results),
++                    "known_cost_upper_usd": sum(r["known_cost_upper_usd"] for r in results if r["category"] == cat)}
++                    for cat in sorted(CATEGORIES)},
++               "median_solved_cost_upper_usd": statistics.median(solved_costs) if solved_costs else None,
++               "mean_solved_cost_upper_usd": statistics.mean(solved_costs) if solved_costs else None,
++               "max_solved_cost_upper_usd": max(solved_costs) if solved_costs else None,
++               "scope": "small diagnostic sample, not a full benchmark result" if label == "pilot" else "NYU test run"}
++    (directory / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
++    print(json.dumps(summary, ensure_ascii=False))
++    return 0
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    mode = parser.add_mutually_exclusive_group(required=True)
++    mode.add_argument("--prepare", action="store_true")
++    mode.add_argument("--preflight", action="store_true")
++    mode.add_argument("--pilot", action="store_true")
++    mode.add_argument("--run", action="store_true", help="Run selected IDs, or all 200 NYU test tasks")
++    parser.add_argument("--image", default=SETTINGS["image"])
++    parser.add_argument("--per-instance", type=float, default=None)
++    parser.add_argument("--total", type=float, default=None)
++    parser.add_argument("--ids", nargs="+", default=None)
++    args = parser.parse_args()
++    if args.per_instance is None:
++        args.per_instance = (SETTINGS["pilot_per_instance_cost_limit"] if args.pilot
++                             else SETTINGS["per_instance_cost_limit"])
++    if args.run and args.total is None:
++        parser.error("--run requires an explicit --total budget")
++    if args.total is None:
++        args.total = SETTINGS["pilot_total_cost_limit"]
++    if any(not math.isfinite(v) or v <= 0 for v in (args.per_instance, args.total)):
++        parser.error("Both budget limits must be finite and strictly positive")
++    os.chdir(ROOT)
++    records = prepare()
++    if args.preflight:
++        return 0 if preflight(args.image)["ready"] else 2
++    if args.pilot or args.run:
++        identifiers = args.ids or (SETTINGS["pilot_ids"] if args.pilot else [r["id"] for r in records])
++        return pilot(records, args.image, args.per_instance, args.total, identifiers,
++                     label="pilot" if args.pilot else "run")
++    return 0
++
++
++if __name__ == "__main__":
++    try:
++        sys.exit(main())
++    except Exception as e:
++        # Avoid printing credential-bearing exception messages or traceback locals.
++        print(f"Preparation failed: {type(e).__name__}", file=sys.stderr)
++        sys.exit(2)
+diff --git a/enigma_reproduction/metrics.py b/enigma_reproduction/metrics.py
+new file mode 100644
+index 0000000..b1b871e
+--- /dev/null
++++ b/enigma_reproduction/metrics.py
+@@ -0,0 +1,53 @@
++"""Passive metrics; never changes an agent action, observation or prompt."""
++from __future__ import annotations
++
++import json
++import re
++import time
++from collections import Counter
++from pathlib import Path
++
++
++class StepMetrics:
++    # The v0.7 hook interface is duck typed. Missing callbacks remain no-ops.
++    def __init__(self, path: Path, *, process_logger=None):
++        self.path = path
++        self.process_logger = process_logger
++        self.previous = {"tokens_sent": 0, "tokens_received": 0, "api_calls": 0, "instance_cost": 0}
++        self.steps = 0
++        self.tools = Counter()
++        self.start = None
++        self.action_and_summary_seconds = 0.0
++
++    def __getattr__(self, name):
++        if name.startswith("on_"):
++            return lambda **kwargs: None
++        raise AttributeError(name)
++
++    def on_step_start(self):
++        self.start = time.perf_counter()
++
++    def on_step_done(self, *, trajectory_step, model_stats):
++        self.steps += 1
++        action = trajectory_step.get("action", "")
++        first = action.strip().split(maxsplit=1)[0] if action.strip() else ""
++        tool = first if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_-]*", first) else "shell_expression"
++        self.tools[tool] += 1
++        stats = model_stats.to_dict()
++        delta = {key: stats[key] - value for key, value in self.previous.items()}
++        self.previous = {key: stats[key] for key in self.previous}
++        self.action_and_summary_seconds += trajectory_step.get("execution_time", 0.0)
++        observation = trajectory_step.get("observation") or ""
++        row = {"step": self.steps, "tool": tool,
++               "wall_seconds": time.perf_counter() - self.start if self.start is not None else None,
++               "action_and_summary_seconds": trajectory_step.get("execution_time"),
++               "observation_characters": len(observation), "observation_lines": len(observation.splitlines()),
++               "response_characters": len(trajectory_step.get("response") or ""),
++               "tokens_sent": delta["tokens_sent"], "tokens_received": delta["tokens_received"],
++               "api_calls": delta["api_calls"], "cost_upper_usd": delta["instance_cost"],
++               "cumulative_cost_upper_usd": stats["instance_cost"]}
++        with self.path.open("a") as f:
++            f.write(json.dumps(row) + "\n")
++        if self.process_logger is not None:
++            self.process_logger.info("STEP %s\n%s", self.steps, json.dumps(
++                {"metrics": row, "trajectory_step": trajectory_step}, ensure_ascii=False))
+diff --git a/enigma_reproduction/task_log.py b/enigma_reproduction/task_log.py
+new file mode 100644
+index 0000000..7d3e787
+--- /dev/null
++++ b/enigma_reproduction/task_log.py
+@@ -0,0 +1,79 @@
++"""One readable log per task, with final metrics before the streamed process.
++
++This module only handles files; it never changes prompts, tools or agent state.
++"""
++from __future__ import annotations
++
++import json
++import os
++import re
++import shutil
++import tempfile
++from datetime import datetime
++from pathlib import Path
++from zoneinfo import ZoneInfo
++
++from sweagent.utils.secrets import redact
++
++
++def safe_name(value: str) -> str:
++    value = re.sub(r'[\s\\/:*?"<>|\x00-\x1f\x7f]+', "_", redact(value))
++    return value.strip("._").encode("utf-8")[:160].decode("utf-8", errors="ignore") or "challenge"
++
++
++class TaskLog:
++    def __init__(self, root: Path, *, model: str, name: str, identifier: str,
++                 category: str, budget: float):
++        now = datetime.now(ZoneInfo("Asia/Shanghai"))
++        directory = root / safe_name(model)
++        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
++        directory.chmod(0o700)
++        self.path = directory / f"{safe_name(name)}_{now.strftime('%Y%m%d_%H%M%S_%f')}.log"
++        self.metadata = {"name": name, "id": identifier, "category": category,
++                         "model": model, "per_instance_cost_limit_usd": budget,
++                         "started_at": now.isoformat(timespec="seconds")}
++        header = self._header({"exit_status": "running"}).encode("utf-8")
++        self.process_offset = len(header)
++        # Exclusive creation preserves earlier logs even for repeated runs.
++        with os.fdopen(os.open(self.path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600), "wb") as f:
++            f.write(header)
++
++    def _header(self, metrics: dict) -> str:
++        values = {**self.metadata, **metrics}
++        groups = (
++            ("题目", ("name", "id", "category", "model")),
++            ("结果", ("exit_status", "solved", "accounting_complete")),
++            ("费用与预算（USD）", ("per_instance_cost_limit_usd", "cost_upper_usd", "cost_lower_usd",
++                              "known_cost_upper_usd", "known_cost_lower_usd")),
++            ("步骤与模型调用", ("steps", "api_calls", "by_role")),
++            ("Token 与缓存", ("prompt_tokens", "completion_tokens", "cache_hit_tokens", "cache_hit_ratio")),
++            ("耗时（秒）", ("wall_seconds", "initialization_seconds", "api_latency_seconds",
++                         "action_and_summary_seconds")),
++            ("时间（Asia/Shanghai）", ("started_at", "finished_at")),
++            ("工具调用", ("tool_counts",)),
++            ("诊断与原始数据", ("error_type", "error_message", "cleanup_errors", "trajectory_dir",
++                           "usage_ledger", "step_metrics")),
++        )
++        lines = ["=== 主要指标（null 表示尚未统计或未知；费用为价格上下界估算） ==="]
++        for label, keys in groups:
++            lines.append(label + ": " + json.dumps({k: values.get(k) for k in keys}, ensure_ascii=False))
++        lines.append("=== 解题过程 ===")
++        return redact("\n".join(lines) + "\n")
++
++    def finalize(self, metrics: dict) -> None:
++        """Replace the initial metrics only, after the logging handler is closed.
++
++        Copy the process in chunks, so large challenge outputs are not buffered.
++        Atomic replacement keeps a readable log even if finalization is interrupted.
++        """
++        metrics = {**metrics, "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")}
++        descriptor, temporary = tempfile.mkstemp(prefix=".task-log-", dir=self.path.parent)
++        try:
++            with os.fdopen(descriptor, "wb") as target, self.path.open("rb") as source:
++                target.write(self._header(metrics).encode("utf-8"))
++                source.seek(self.process_offset)
++                shutil.copyfileobj(source, target)
++            os.replace(temporary, self.path)
++        finally:
++            if os.path.exists(temporary):
++                os.unlink(temporary)
+diff --git a/tests/test_deepseek_flash_reproduction.py b/tests/test_deepseek_flash_reproduction.py
+new file mode 100644
+index 0000000..05960c1
+--- /dev/null
++++ b/tests/test_deepseek_flash_reproduction.py
+@@ -0,0 +1,322 @@
++"""Offline checks only: no API requests and no Docker solver execution."""
++from __future__ import annotations
++
++import json
++import logging
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import Mock
++
++import pytest
++
++from sweagent.agent.agents import Agent, AgentArguments
++from sweagent.agent.deepseek_flash import DeepSeekFlashModel
++from sweagent.agent.models import APIStats, CostLimitExceededError, ModelArguments, get_model
++from sweagent.agent.summarizer import LMSummarizer
++from sweagent.utils.secrets import SecretFilter
++from sweagent.utils.secrets import credential_free_environment
++from enigma_reproduction.metrics import StepMetrics
++from enigma_reproduction.task_log import TaskLog
++from enigma_reproduction.run_nyu import usage_summary
++from sweagent.utils.log import add_file_handler, get_logger, remove_file_handlers
++from sweagent.environment.utils import image_exists
++
++
++@pytest.fixture
++def flash(monkeypatch, tmp_path):
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-test-credential")
++    monkeypatch.setenv("ENIGMA_USAGE_LEDGER", str(tmp_path / "usage.jsonl"))
++    client = Mock()
++    monkeypatch.setattr("sweagent.agent.deepseek_flash.OpenAI", Mock(return_value=client))
++    model = get_model(ModelArguments(model_name="deepseek-flash", per_instance_cost_limit=3,
++                                   total_cost_limit=9, temperature=0, top_p=.95))
++    assert isinstance(model, DeepSeekFlashModel)
++    return model
++
++
++def response(prompt=1000, completion=100, hit=200, content="DISCUSSION\nCheck files\n```\nls\n```"):
++    return SimpleNamespace(model="deepseek-flash", usage=SimpleNamespace(
++        prompt_tokens=prompt, completion_tokens=completion,
++        prompt_cache_hit_tokens=hit, prompt_cache_miss_tokens=prompt-hit),
++        choices=[SimpleNamespace(message=SimpleNamespace(content=content), finish_reason="stop")])
++
++
++def test_usage_cache_and_interface(flash):
++    flash.client.chat.completions.create.return_value = response()
++    flash.query([{"role": "user", "content": "challenge", "agent": "primary", "is_demo": True}])
++    cost = (200*.006 + 800*.3 + 100*1.2)/1e6
++    assert flash.stats.instance_cost == pytest.approx(cost)
++    assert flash.stats.api_calls == 1
++    kwargs = flash.client.chat.completions.create.call_args.kwargs
++    assert kwargs["model"] == "deepseek-flash"
++    assert kwargs["messages"] == [{"role": "user", "content": "challenge"}]
++    assert kwargs["temperature"] == 0 and kwargs["top_p"] == .95
++    assert kwargs["extra_body"] == {"thinking": {"type": "disabled"}}
++    assert kwargs["max_tokens"] == 4096
++    assert "tools" not in kwargs
++
++
++@pytest.mark.parametrize("usage", [None, SimpleNamespace(prompt_tokens=-1, completion_tokens=1),
++                                SimpleNamespace(prompt_tokens=0, completion_tokens=0)])
++def test_missing_usage_fails_closed(flash, usage, monkeypatch):
++    r = response(); r.usage = usage
++    flash.client.chat.completions.create.return_value = r
++    with pytest.raises(RuntimeError, match="valid usage"):
++        flash.query([])
++    ledger = json.loads(__import__("pathlib").Path(__import__("os").environ["ENIGMA_USAGE_LEDGER"]).read_text())
++    assert ledger["accounting_complete"] is False
++    assert ledger["cost_upper_usd"] is None
++
++
++def test_bad_cache_usage_fails_closed(flash):
++    r = response(); r.usage.prompt_cache_hit_tokens = 1001
++    flash.client.chat.completions.create.return_value = r
++    with pytest.raises(RuntimeError, match="cache usage"):
++        flash.query([])
++
++
++def test_empty_output_charges_before_error(flash):
++    flash.client.chat.completions.create.return_value = response(content="")
++    with pytest.raises(RuntimeError, match="usage charged"):
++        flash.query([])
++    assert flash.stats.instance_cost > 0 and flash.stats.api_calls == 1
++
++
++def test_credentials_not_sent_or_returned(flash):
++    with pytest.raises(RuntimeError, match="request blocked"):
++        flash.query([{"role": "user", "content": "synthetic-test-credential"}])
++    flash.client.chat.completions.create.assert_not_called()
++    flash.client.chat.completions.create.return_value = response(content="synthetic-test-credential")
++    assert flash.query([]) == "[REDACTED]"
++
++
++def test_api_errors_no_secret_and_no_retry(flash):
++    flash.client.chat.completions.create.side_effect = ValueError("synthetic-test-credential")
++    with pytest.raises(RuntimeError) as error:
++        flash.query([])
++    assert "synthetic-test-credential" not in str(error.value)
++    assert flash.client.chat.completions.create.call_count == 1
++
++
++def test_combined_budget_before_and_after_summary(flash):
++    primary = SimpleNamespace(stats=APIStats(instance_cost=2.9999, total_cost=2.9999))
++    flash.budget_source = primary
++    flash.accounting_role = "summarizer"
++    flash.client.chat.completions.create.return_value = response()
++    with pytest.raises(CostLimitExceededError):
++        flash.query([])
++    assert flash.stats.instance_cost > 0  # The limit-crossing response is still accounted.
++    with pytest.raises(CostLimitExceededError):
++        flash.query([])
++    assert flash.client.chat.completions.create.call_count == 1
++
++
++def test_log_redaction_handles_tracebacks(monkeypatch):
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-sensitive-value")
++    try:
++        raise ValueError("synthetic-sensitive-value")
++    except ValueError:
++        import sys
++        record = logging.LogRecord("test", logging.ERROR, "", 1,
++                                   "Authorization: Bearer %s", ("synthetic-sensitive-value",), sys.exc_info())
++    assert SecretFilter().filter(record)
++    assert "synthetic-sensitive-value" not in record.getMessage()
++    assert "Bearer" not in record.getMessage()
++    assert record.exc_info is None
++
++
++def test_summary_success_and_failure_leave_single_system_message(flash, monkeypatch):
++    summary = LMSummarizer(105)
++    summary.history = [{"role": "system", "content": "Summarize"}]
++    summary.instance_template = "{command}\n{observation}"
++    summary.instance_args = {}; summary.system_args = {}; summary.name = "ctf_summarizer"
++    monkeypatch.setattr(summary, "_upload_file_to_container", Mock())
++    flash.client.chat.completions.create.return_value = response(content="summary")
++    text, stats = summary("ls", "line\n"*106, Mock(), flash)
++    assert "SUMMARY" in text and stats.api_calls == 1
++    assert flash.stats.api_calls == 0 and len(summary.history) == 1
++    flash.client.chat.completions.create.return_value = response(content="")
++    with pytest.raises(RuntimeError):
++        summary("ls", "line\n"*106, Mock(), flash)
++    assert flash.stats.api_calls == 1 and len(summary.history) == 1
++
++
++def test_agent_keeps_summary_failure_cost_and_stops(flash, monkeypatch):
++    args = AgentArguments(model=flash.args, config_file="config/ctf/ctf_crypto.yaml")
++    monkeypatch.setattr("sweagent.agent.agents.get_model", Mock(side_effect=[flash, flash]))
++    agent = Agent("primary", args)
++    agent._env = Mock()
++    agent._env.step.side_effect = [("output", 0, False, {}), ("stopped", 0, True, {"exit_status": "exit_cost"})]
++    # Separate stats objects, as in the real main and summary models.
++    summary = Mock(strict_accounting=True, stats=APIStats(instance_cost=.4, total_cost=.4, api_calls=1))
++    agent.summarizer_model = summary
++    object.__setattr__(agent.config.summarizer_config, "function", Mock(side_effect=CostLimitExceededError("limit")))
++    agent.info = {}
++    _, done = agent._run_sub_action({"agent": "primary", "cmd_name": "ls", "action": "ls"})
++    assert done and agent.info["exit_status"] == "exit_cost"
++    assert agent.model.stats.instance_cost == pytest.approx(.4)
++    assert agent.info["summarizer"]["model_stats"]["instance_cost"] == pytest.approx(.4)
++    summary.reset_stats.assert_called_once()
++
++
++def test_compose_environment_drops_credentials(monkeypatch):
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-test-credential")
++    monkeypatch.setenv("ENIGMA_NON_SECRET_SETTING", "also-sensitive-by-name")
++    monkeypatch.setenv("CTF_TEST_PUBLIC_PORT", "80")
++    clean = credential_free_environment()
++    assert "DEEPSEEK_API_KEY" not in clean
++    assert "ENIGMA_NON_SECRET_SETTING" not in clean
++    assert clean["CTF_TEST_PUBLIC_PORT"] == "80"
++
++
++def test_step_metrics_are_passive_and_include_summary_cost(tmp_path):
++    metrics = StepMetrics(tmp_path / "steps.jsonl")
++    step = {"action": "debug_exec disassemble", "observation": "one\ntwo", "response": "text",
++            "execution_time": .2}
++    stats = APIStats(instance_cost=.03, total_cost=.03, tokens_sent=50, tokens_received=5, api_calls=2)
++    metrics.on_step_start()
++    metrics.on_step_done(trajectory_step=step, model_stats=stats)
++    metrics.on_step_start()
++    metrics.on_step_done(trajectory_step=step, model_stats=stats)
++    rows = [json.loads(line) for line in metrics.path.read_text().splitlines()]
++    assert rows[0]["api_calls"] == 2 and rows[0]["cost_upper_usd"] == .03
++    assert rows[1]["api_calls"] == 0 and rows[1]["cost_upper_usd"] == 0
++    assert rows[0]["observation_lines"] == 2 and rows[0]["tool"] == "debug_exec"
++    assert step["response"] == "text" and stats.api_calls == 2
++
++
++def test_unknown_cost_is_not_reported_as_zero(tmp_path):
++    path = tmp_path / "usage.jsonl"
++    path.write_text(json.dumps({"role": "primary", "accounting_complete": False,
++                               "cost_upper_usd": None}) + "\n")
++    stats = usage_summary(path)
++    assert stats["accounting_complete"] is False
++    assert stats["cost_upper_usd"] is None and stats["cost_lower_usd"] is None
++
++
++def test_batch_logs_do_not_contaminate_previous_task(tmp_path):
++    logger = get_logger("reproduction-test-log")
++    first, second = tmp_path / "first.log", tmp_path / "second.log"
++    add_file_handler(first)
++    logger.warning("first-task-message")
++    remove_file_handlers()
++    add_file_handler(second)
++    logger.warning("second-task-message")
++    remove_file_handlers()
++    assert "second-task-message" not in first.read_text()
++    assert "first-task-message" not in second.read_text()
++
++
++def test_immutable_docker_image_is_recognized(monkeypatch):
++    client = Mock()
++    client.images.list.return_value = []
++    client.images.get.return_value.attrs = {"RepoTags": [], "Created": "test", "Os": "linux", "Architecture": "amd64"}
++    monkeypatch.setattr("sweagent.environment.utils.docker.from_env", Mock(return_value=client))
++    assert image_exists("sha256:" + "a"*64)
++    client.images.get.assert_called_once_with("sha256:" + "a"*64)
++
++
++def test_task_log_final_metrics_precede_process_and_keep_private_names(tmp_path, monkeypatch):
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-log-credential")
++    task = TaskLog(tmp_path / "logs", model="deepseek-flash",
++                   name="../中文题目/" + "长" * 100, identifier="nyu-test-id", category="crypto", budget=.4)
++    assert task.path.parent == tmp_path / "logs/deepseek-flash"
++    assert len(task.path.name.encode("utf-8")) <= 255
++    assert task.path.stat().st_mode & 0o777 == 0o600
++    assert '"exit_status": "running"' in task.path.read_text()
++    logger = get_logger("reproduction-task-log-test")
++    add_file_handler(task.path)
++    # A large Unicode body exercises streamed copying and byte offsets.
++    logger.info("解题输出 %s %s", "输出" * 10000, "synthetic-log-credential")
++    remove_file_handlers()
++    body = task.path.read_bytes()[task.process_offset:]
++    task.finalize({"exit_status": "submitted", "solved": True, "steps": 13,
++                   "cost_upper_usd": .02, "cost_lower_usd": .01, "accounting_complete": True})
++    final = task.path.read_text()
++    header, process = final.split("=== 解题过程 ===\n", 1)
++    assert '"exit_status": "submitted"' in header and '"cost_upper_usd": 0.02' in header
++    assert '"per_instance_cost_limit_usd": 0.4' in header
++    assert process.encode("utf-8") == body
++    assert "synthetic-log-credential" not in final and "[REDACTED]" in process
++    assert len(list(task.path.parent.iterdir())) == 1
++
++
++@pytest.mark.parametrize("label", ["run", "pilot"])
++@pytest.mark.parametrize("interrupted", [False, True])
++def test_formal_and_pilot_share_single_log_layout_and_budget(tmp_path, monkeypatch, label, interrupted):
++    import os
++    import docker
++    import run
++    import enigma_reproduction.run_nyu as runner
++
++    generated = tmp_path / "generated"
++    generated.mkdir()
++    (generated / "inventory.json").write_text("{}")
++    monkeypatch.setattr(runner, "ROOT", tmp_path)
++    monkeypatch.setattr(runner, "GENERATED", generated)
++    monkeypatch.setattr(runner, "preflight", lambda image: {"ready": True, "resolved_image": "sha256:test"})
++    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-log-credential")
++    monkeypatch.setenv("ENIGMA_USAGE_LEDGER", "unused-test-ledger")
++    monkeypatch.setattr(docker, "from_env", Mock(return_value=Mock()))
++    # Real official category config/arguments are loaded; only Docker and Main are replaced.
++    records = [{"id": "nyu-test-id", "name": "Example Challenge", "category": "crypto",
++                "path": str(tmp_path), "missing_attachments": [],
++                "config": str(Path("config/ctf/ctf_crypto.yaml").resolve())}]
++    used_budgets = []
++
++    class OfflineMain:
++        def __init__(self, args, *, log_path):
++            used_budgets.append(args.agent.model.per_instance_cost_limit)
++            add_file_handler(log_path)
++            self.agent = SimpleNamespace(info={"exit_status": "submitted"},
++                model=Mock(), summarizer_model=Mock(), add_hook=lambda hook: setattr(self, "hook", hook))
++            self.env = Mock()
++            self.traj_dir = tmp_path / "trajectory"
++
++        def run(self, index):
++            self.hook.on_step_start()
++            self.hook.on_step_done(trajectory_step={"response": "DISCUSSION\nSolve\n```\nsubmit flag\n```",
++                "action": "submit flag", "observation": "Accepted", "execution_time": .1},
++                model_stats=APIStats(instance_cost=.02, total_cost=.02, api_calls=1,
++                                     tokens_sent=100, tokens_received=5))
++            Path(os.environ["ENIGMA_USAGE_LEDGER"]).write_text(json.dumps({"role": "primary",
++                "accounting_complete": True, "prompt_tokens": 100, "completion_tokens": 5,
++                "cache_hit_tokens": 20, "cost_upper_usd": .02, "cost_lower_usd": .01}) + "\n")
++            if interrupted:
++                raise KeyboardInterrupt
++
++    monkeypatch.setattr(run, "Main", OfflineMain)
++    if interrupted:
++        with pytest.raises(KeyboardInterrupt):
++            runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-id"], label=label)
++    else:
++        assert runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-id"], label=label) == 0
++    logs = list((tmp_path / "logs/deepseek-flash").glob("*.log"))
++    assert len(logs) == 1 and logs[0].name.startswith("Example_Challenge_")
++    content = logs[0].read_text()
++    header, process = content.split("=== 解题过程 ===\n", 1)
++    assert '"cost_upper_usd": 0.02' in header
++    if interrupted:
++        assert '"exit_status": "interrupted"' in header
++        return
++    assert '"solved": true' in header
++    assert "Accepted" in process and "submit flag" in process and "STEP 1" in process
++    assert used_budgets == [.4]
++    result = json.loads(next(generated.glob(f"{label}-*/results.json")).read_text())[0]
++    assert result["log_file"] == str(logs[0]) and result["api_calls"] == 1
++
++
++def test_main_explicit_log_path_avoids_extra_trajectory_log(tmp_path, monkeypatch):
++    import run
++    monkeypatch.chdir(tmp_path)
++    monkeypatch.setattr(run, "Agent", Mock())
++    monkeypatch.setattr(run, "SWEEnv", Mock())
++    monkeypatch.setattr(run.Main, "_save_arguments", Mock())
++    path = tmp_path / "Example_20261008_120000.log"
++    try:
++        main = run.Main(SimpleNamespace(run_name="offline-test", print_config=False,
++                                       agent=Mock(), environment=Mock(),
++                                       actions=run.ActionsArguments()), log_path=path)
++    finally:
++        remove_file_handlers()
++    assert path.is_file() and not list(main.traj_dir.glob("*.log"))

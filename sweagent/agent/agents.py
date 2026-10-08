@@ -271,6 +271,9 @@ class Agent:
         self.summarizer_model = get_model(
             args.config.summarizer_config.model if args.config.summarizer_config.model is not None else args.model
         )
+        if getattr(self.summarizer_model, "strict_accounting", False):
+            self.summarizer_model.budget_source = self.model
+            self.summarizer_model.accounting_role = "summarizer"
         self.config = args.config
         assert self.config is not None  # mypy
         self.system_args = {
@@ -944,9 +947,20 @@ class Agent:
             for hook in self.hooks:
                 hook.on_sub_action_started(sub_action=sub_action)
             observation, _, done, _info = self._env.step(sub_action["action"])
-            observation, additional_cost = self.config.summarizer_config.function(  # type: ignore
-                sub_action["action"], observation, self._env, self.summarizer_model
-            )
+            try:
+                observation, additional_cost = self.config.summarizer_config.function(  # type: ignore
+                    sub_action["action"], observation, self._env, self.summarizer_model
+                )
+            except (CostLimitExceededError, RuntimeError) as e:
+                if not getattr(self.summarizer_model, "strict_accounting", False):
+                    raise
+                self._update_summarizer_stats(self.summarizer_model.stats)
+                self.summarizer_model.reset_stats(APIStats())
+                self.logger.warning("Summarizer stopped: %s", e)
+                status = "exit_cost" if isinstance(e, CostLimitExceededError) else "exit_error"
+                observation, _, done, _info = self._env.step(status)
+                self.info.update(_info)
+                return observation, done
             self._update_summarizer_stats(additional_cost)
             self.info.update(_info)
             for hook in self.hooks:

@@ -26,6 +26,7 @@ import docker.types
 from docker.models.containers import Container
 from sweagent.utils.config import keys_config
 from sweagent.utils.log import get_logger
+from sweagent.utils.secrets import credential_free_environment
 
 DOCKER_START_UP_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 1))
 DOCKER_COMPOSE_TERMINATION_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 100))
@@ -430,6 +431,7 @@ def get_docker_compose(docker_compose_path: Path) -> Path:
     logger.debug("Starting docker-compose with command: %s", shlex.join(startup_cmd))
     compose = subprocess.Popen(
         startup_cmd,
+        env=credential_free_environment(),
         stdin=PIPE,
         stdout=PIPE,
         stderr=STDOUT,
@@ -620,6 +622,12 @@ def image_exists(image_name: str) -> bool:
             raise RuntimeError(msg) from e
         raise
     filterred_images = client.images.list(filters={"reference": image_name})
+    if len(filterred_images) == 0 and (image_name.startswith("sha256:") or "@sha256:" in image_name):
+        # Docker reference filters match tags, not immutable content IDs.
+        try:
+            filterred_images = [client.images.get(image_name)]
+        except docker.errors.ImageNotFound:
+            return False
     if len(filterred_images) == 0:
         return False
     elif len(filterred_images) > 1:

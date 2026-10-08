@@ -30,7 +30,7 @@ class SummarizerConfig(FrozenSerializable):
     def __post_init__(self):
         object.__setattr__(self, "function", SummarizeFunction.get(self.function, self.window_length))  # type: ignore
         if isinstance(self.model, dict):
-            object.__setattr__(self, "model", ModelArguments.from_dict(self.summarizer_model))  # type: ignore
+            object.__setattr__(self, "model", ModelArguments.from_dict(self.model))  # type: ignore
 
 
 # ABSTRACT BASE CLASSES
@@ -196,6 +196,7 @@ class LMSummarizer(SummarizeFunction):
 
     def setup(self, instance_args: dict[str, Any], config):
         self.name = "ctf_summarizer"
+        self.history = []
         self.system_args = config.__dict__
         self.system_args.update({f"summarizer_{k}": v for k, v in config.summarizer_config.__dict__.items()})
         system_msg = config.summarizer_config.system_template.format(**self.system_args)
@@ -205,6 +206,7 @@ class LMSummarizer(SummarizeFunction):
         self.instance_args = instance_args
 
     def __call__(self, input: str, observation: str, env: SWEEnv, model: BaseModel) -> tuple[str, APIStats]:
+        history_length = len(self.history)
         try:
             if (
                 any(input.startswith(s) for s in self.block_list_input)
@@ -238,7 +240,11 @@ class LMSummarizer(SummarizeFunction):
                 self._warning_message_summarization_failed.format(command_file_name=command_file_name)
             ), APIStats()
         except Exception:
+            if getattr(model, "strict_accounting", False):
+                raise
             self.logger.warning(
                 f"Unhandled exception occurred when trying to summarize observation for input {input}: {traceback.format_exc()}"
             )
             return observation, APIStats()
+        finally:
+            del self.history[history_length:]
