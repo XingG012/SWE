@@ -320,3 +320,87 @@ def test_main_explicit_log_path_avoids_extra_trajectory_log(tmp_path, monkeypatc
     finally:
         remove_file_handlers()
     assert path.is_file() and not list(main.traj_dir.glob("*.log"))
+
+
+def test_repository_accepts_committed_patches_but_rejects_method_changes(tmp_path, monkeypatch):
+    import subprocess
+    import enigma_reproduction.run_nyu as runner
+
+    def git(*args, check=True):
+        return subprocess.run(["git", *args], cwd=tmp_path, capture_output=True, check=check)
+
+    git("init", "-q")
+    git("config", "user.name", "Offline test")
+    git("config", "user.email", "offline@example.invalid")
+    method = tmp_path / "config/ctf/ctf_crypto.yaml"
+    method.parent.mkdir(parents=True)
+    method.write_text("official method")
+    adapter = tmp_path / "sweagent/agent/models.py"
+    adapter.parent.mkdir(parents=True)
+    adapter.write_text("official models")
+    git("add", ".")
+    git("commit", "-qm", "baseline")
+    base = git("rev-parse", "HEAD").stdout.decode().strip()
+    adapter.write_text("documented model dispatch patch")
+    git("add", ".")
+    git("commit", "-qm", "compatibility patch")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "SETTINGS", {"upstream_commit": base})
+    status = runner.repository_status()
+    assert status["v0_7_ancestor"] and status["original_method_files_unchanged"]
+    assert status["runtime_commit"] != base
+    method.write_text("changed prompt")
+    assert not runner.repository_status()["original_method_files_unchanged"]
+    git("add", ".")
+    git("commit", "-qm", "method change")
+    assert not runner.repository_status()["original_method_files_unchanged"]
+    monkeypatch.setattr(runner, "SETTINGS", {"upstream_commit": "0" * 40})
+    assert not runner.repository_status()["v0_7_ancestor"]
+
+
+def test_resume_skips_completed_but_retries_infra_and_interrupted(tmp_path, monkeypatch):
+    import enigma_reproduction.run_nyu as runner
+    generated = tmp_path / "generated"
+    (generated / "run-20261008T000000000000Z").mkdir(parents=True)
+    (generated / "run-20261008T000000000000Z" / "results.json").write_text(json.dumps([
+        {"id": "done-solved", "accounting_complete": True, "exit_status": "submitted"},
+        {"id": "done-failed", "accounting_complete": True, "exit_status": "exit_format"},
+        {"id": "retry-infra", "accounting_complete": True, "exit_status": "infrastructure_error"},
+        {"id": "retry-unknown", "accounting_complete": False, "exit_status": "submitted"},
+    ]))
+    # A pilot batch must not leak into the formal run's completed set.
+    (generated / "pilot-20261008T000000000000Z").mkdir(parents=True)
+    (generated / "pilot-20261008T000000000000Z" / "results.json").write_text(json.dumps([
+        {"id": "pilot-only", "accounting_complete": True, "exit_status": "submitted"},
+    ]))
+    monkeypatch.setattr(runner, "GENERATED", generated)
+    assert runner.prior_completed_ids("run") == {"done-solved", "done-failed"}
+    assert runner.prior_completed_ids("pilot") == {"pilot-only"}
+
+
+def test_network_connection_has_own_timeout_and_no_credential_environment(monkeypatch):
+    import sweagent.environment.utils as utils
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-network-credential")
+    connect = Mock()
+    monkeypatch.setattr(utils.subprocess, "run", connect)
+    utils.attach_network_interface_to_container("owned-test-container")
+    args, kwargs = connect.call_args
+    assert args[0] == ["docker", "network", "connect", "ctfnet", "owned-test-container"]
+    assert kwargs["timeout"] == 60 and kwargs["check"] is True
+    assert "DEEPSEEK_API_KEY" not in kwargs["env"]
+
+
+def test_network_connection_reports_timeout_and_failed_exit(monkeypatch):
+    import subprocess
+    import sweagent.environment.utils as utils
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-network-credential")
+    connect = Mock(side_effect=subprocess.TimeoutExpired(["docker"], 60))
+    monkeypatch.setattr(utils.subprocess, "run", connect)
+    with pytest.raises(RuntimeError, match="timed out after 60 seconds"):
+        utils.attach_network_interface_to_container("owned-test-container")
+    # A daemon error must stop initialization, rather than solving without ctfnet.
+    connect.side_effect = subprocess.CalledProcessError(1, ["docker"],
+        stderr="Docker error synthetic-network-credential")
+    with pytest.raises(RuntimeError, match="connection failed") as error:
+        utils.attach_network_interface_to_container("owned-test-container")
+    assert "synthetic-network-credential" not in str(error.value)

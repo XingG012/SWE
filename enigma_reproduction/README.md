@@ -4,7 +4,9 @@
 `084d5d164729ddcbe8fbc05877ead403549ef669`，工作分支为 `enigma-v0.7`。
 原项目 `origin` 是 `https://github.com/XingG012/SWE.git`，原 `main` 的
 `40ca3f37b159dd65eb538a4f0a9934ce57563f26` 已保留；`upstream` 指向官方仓库。
-切换前工作区没有已跟踪文件改动。当前改动是下面列明的复现适配，尚未提交。
+切换前工作区没有已跟踪文件改动。复现适配主体已提交为
+`b520e6c9f8a1b2e7d4a1e52aa3a20da0921a5caf`，它的父提交就是上述官方 v0.7 基线。
+本次启动预检修复及文档更新保留在工作区，未新增提交。
 
 依据：[ICML 2025 正式论文](https://proceedings.mlr.press/v267/abramovich25a.html)、
 [官方 v0.7 源码](https://github.com/SWE-agent/SWE-agent/tree/v0.7)、
@@ -28,11 +30,11 @@
 | 评分 | 官方 `SWEEnv.validate_submission`，保留原精确匹配及 `flag{...}` 包装规则；只把 `exit_status == submitted` 计为成功 |
 | 容器 | 官方 `sweagent/enigma`，解析后按不可变 image ID 运行；不用 `ctfenv` 或 `ctfenv:multiagent` 替代 |
 | 模型 | 主智能体和摘要均为 `deepseek-flash`；仅 OpenAI 兼容端点 `https://api.deepseek.com` |
-| 当前预算 | 正式运行及新试跑均为每题 0.4 USD；正式整批命令为 80 USD，默认三题试跑整批为 1.2 USD |
+| 当前预算 | 正式运行及新试跑均为每题 0.2 USD；正式整批命令为 40 USD，默认三题试跑整批为 0.6 USD |
 
 三题真实试跑已完成：2 题成功，1 题格式停止，总费用上界约 0.153 USD。
 详见 [试跑结果](RESULTS.md)。历史诊断试跑使用每题 3 USD / 整批 9 USD；随后按用户要求，
-当前正式运行和新试跑默认每题 **0.4 USD**。正式整批预算必须通过 `--total` 明确指定。
+当前正式运行和新试跑默认每题 **0.2 USD**。正式整批预算必须通过 `--total` 明确指定。
 没有将两道成功样本的成本推广为整个测试集的平均成本。
 
 论文表 6 为 crypto 53、forensics 15、pwn 38、rev 51、misc 24、web 19。
@@ -48,7 +50,7 @@
 
 `/home/xing/llm_ctf_automation_qwen_3/` 可访问。只读查看模型接口与预算参考：
 原 baseline 的默认成本上限为 10 USD，部分配置输出上限为 4096 tokens；没有导入其提示词、
-规划器、执行器、日志、方法配置或工具。历史诊断试跑每题 3 USD 来自 EnIGMA 论文；当前每题 0.4 USD 由用户指定。
+规划器、执行器、日志、方法配置或工具。历史诊断试跑每题 3 USD 来自 EnIGMA 论文；当前每题 0.2 USD 由用户指定。
 
 ## 模型与计费差异
 
@@ -106,15 +108,30 @@ usage ledger 会记录服务返回的模型标识；这不能替代服务商提�
    `metrics.py` 的被动 hook 记录每步模型响应、动作、观察及指标；不改写 agent 状态。
    文件名去除路径与非法字符，时间戳采用 Asia/Shanghai 并包含微秒，重复运行保留旧日志。
    日志目录权限 0700、文件权限 0600，仍使用凭据脱敏过滤。
-7. 依赖：独立 `.venv-enigma`，不修改系统/用户原 Python 环境。
+7. `run_nyu.py` 的启动预检接受基于固定 v0.7 的已提交适配补丁。原先要求 HEAD
+   精确等于裸 v0.7 提交，会在提交复现补丁后错误拒绝运行。现在验证基线祖先关系，
+   并对未适配的官方 Python 文件、配置、示例与 Dockerfile 做基线差异检查；
+   仅放行已记录的模型、计费、兼容与日志适配文件。预检及批次配置记录实际运行 commit 与工作区差异 SHA256。
+   此修复只改变来源核验，不改变解题方法、预算或评分。
+8. `environment/utils.py` 将 `docker network connect ctfnet` 的等待时间从错误复用
+   容器启动轮询的 1 秒，改为独立的 60 秒超时，适应 WSL 上的 Docker 网络创建延迟。
+   改用 `subprocess.run(check=True)`，失败退出立即报基础设施错误，超时后回收 CLI 子进程，
+   传入过滤凭据的环境，错误诊断脱敏。没有自动重试，不改变网络、工具或模型调用。
+   原容器轮询延迟、题目动作执行超时、模型预算与停止条件没有改动。
+9. 依赖：独立 `.venv-enigma`，不修改系统/用户原 Python 环境。
    `swebench` 2.x 导入依赖已删除的 `modal.Mount`，固定 Modal 0.64.235 修复导入。
    不调用 Modal 云端服务。`constraints.txt` 记兼容约束，`requirements.lock.txt` 记录实际完整版本。
 
 官方六类 YAML、demonstrations、command 文件、交互会话定义和 Dockerfile 没有修改。
 离线测试位于 `tests/test_deepseek_flash_reproduction.py`；测试使用假凭据和模拟响应，不调用模型。
-本次预算与日志适配后共 23 项测试通过，覆盖正式与试跑入口、单题日志、最终指标、
-中断收尾、跨题隔离和脱敏。最后本地预检发现 Docker 服务未运行，运行前先执行下面的启动命令；
-启动入口仍会检查 Docker、固定镜像、凭据与配置，不会跳过预检。
+本次启动检查及网络兼容修复后共 26 项离线测试通过，覆盖正式与试跑入口、单题日志、最终指标、
+中断收尾、跨题隔离、脱敏，以及已提交补丁放行、官方方法改动拦截、网络超时与连接失败的停止和脱敏。
+Docker 服务已恢复，固定官方镜像的 conda 与 CTF 工具再次通过离线容器检查；
+随后对正式首题 `2021f-rev-maze` 按入口解析后的固定 image ID 验证了完整
+`SWEEnv.reset(0)`，确认 ctfnet 已接入、附件与依赖准备完成、命令通道可用；
+全程没有实例化智能体、调用模型或解题，验证容器已删除。
+证据位于 `enigma_reproduction/generated/environment_smoke.json`。
+启动入口仍会检查 Docker、固定镜像、凭据与配置。
 
 ## 操作
 
@@ -149,7 +166,7 @@ docker build --platform linux/amd64 -f docker/enigma.Dockerfile -t enigma:v0.7-0
 
 默认诊断题为 `2017q-cry-another_xor`、`2019q-rev-beleaf`、`2018q-msc-short_circuit`。
 它们有完整附件且不需要题目服务；选题没有查看标准 flag 或旧解题轨迹，不包含泄漏 flag 的玩具题。
-新试跑默认每题 0.4 USD、整批 1.2 USD，与当前正式运行的每题预算相同。
+新试跑默认每题 0.2 USD、整批 0.6 USD，与当前正式运行的每题预算相同。
 不能根据三道诊断题估计整个 NYU 数据集的普遍解题成本或成功率。
 
 本次已成功下载并验证的官方镜像固定为：
@@ -158,18 +175,35 @@ docker build --platform linux/amd64 -f docker/enigma.Dockerfile -t enigma:v0.7-0
 tshark、sqlmap、Ghidra analyzeHeadless 与所需 Python CTF 包可用。
 初次拉取遇到网络 EOF，第二次重试成功；没有换用其他项目镜像。
 
-完整测试由用户手动启动，必须明确填写整批预算。下面给出每题 0.4 USD、整批 80 USD 的
+完整测试由用户手动启动，必须明确填写整批预算。下面给出每题 0.2 USD、整批 40 USD 的
 命令形式；每题预算由用户指定，不是已验证的最佳预算。
 入口检查附件完整性，不会静默忽略缺失题目。目前缺失附件已补齐。
 
 ```bash
 sudo service docker start
-.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.4 --total 80
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
 ```
+
+### 断点续跑
+
+手动中断（Ctrl+C）后重新运行同一命令，会自动跳过之前批次已完成的题目，从
+中断的那道题继续。判断依据是历史 `run-*/results.json`（试跑对应 `pilot-*/results.json`）
+里 `accounting_complete` 为真且 `exit_status` 不是 `infrastructure_error` 的条目：
+
+- 已完成的有效尝试（无论成功或失败）会被跳过，保持 pass@1 口径、不重复计费；
+- 被中断的那道题没有写入 `results.json`，因此会重新尝试；
+- 基础设施故障（`infrastructure_error`）与计费不完整（`accounting_complete` 为假）也会重试。
+
+```bash
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
+```
+
+重新运行时 `--total` 作用于剩余题目，可按剩余预算填写。若确需从头完整重跑，
+加 `--from-scratch` 忽略历史结果。正式运行与试跑的已完成记录互不影响。
 
 正式运行和试跑的可读日志统一保存在 Git 忽略的 **`logs/deepseek-flash/`**，
 每题只有一个 `.log` 文件，例如 `Beleaf_20261008_180000_123456.log`。
-开头约十行列出题目、成功/退出状态、0.4 USD 预算、费用上下界、步骤、主/摘要调用次数、
+开头约十行列出题目、成功/退出状态、0.2 USD 预算、费用上下界、步骤、主/摘要调用次数、
 token/缓存统计、各项耗时、工具频次及原始数据路径；后面连续保存提示、思考、动作、
 每步响应与观察。运行中日志持续写入，开头状态为 `running`；结束或 Ctrl+C 时填入最终指标。
 进程被 SIGKILL 或机器断电时无法执行收尾，可能仍显示 `running`，过程记录保留。

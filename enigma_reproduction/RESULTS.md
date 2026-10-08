@@ -43,18 +43,35 @@ API 次数也完全一致。65 次调用均记录有效 token usage、缓存量�
 - 同目录每题的 `*-usage.jsonl` 和 `*-steps.jsonl`
 - 每题的 `trajectory_dir` 指向 `trajectories/xing/` 下的原始日志、`.traj`、配置与预测
 
-根据用户最新要求，当前正式运行预算设为每题 **0.4 USD**，整批需明确指定，命令为：
+根据用户最新要求，当前正式运行预算设为每题 **0.2 USD**，整批需明确指定，命令为：
 
 ```bash
 cd /home/xing/SWE-agent
 sudo service docker start
-.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.4 --total 80
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
 ```
 
 预算采用官方响应后停止阈值口径，可能超过阈值一个在途请求费用。
-0.4 USD 是用户指定的额度，不是对 200 题成本或成功率的保证。
+0.2 USD 是用户指定的额度，不是对 200 题成本或成功率的保证。
 上述历史诊断结果的预算仍为每题 3 USD / 整批 9 USD，没有重新运行或改写历史指标。
-`--run` 才会启动完整测试；新的诊断入口 `--pilot` 也改为每题 0.4 USD / 整批 1.2 USD。
+`--run` 才会启动完整测试；新的诊断入口 `--pilot` 也改为每题 0.2 USD / 整批 0.6 USD。
 新运行的日志统一为 `logs/deepseek-flash/题目名_时间戳.log`，每题一个文件；
 开头为主要指标，后面为解题过程。原数值 ledger 和官方轨迹继续保留于辅助目录。
 所有 200 题附件现已齐全，正式命令只使用固定官方镜像及 DeepSeek Flash。
+
+## 正式首题启动故障及修复
+
+2026-10-08 首次正式启动 `run-20261008T114022925319Z` 在 `maze` 的
+`docker network connect ctfnet` 阶段因官方复用 1 秒启动轮询延迟而超时。
+该批次 0 次 API 调用、0 USD 已知费用、0 道有效尝试；不作为解题失败或正式成绩。
+原日志和结果未修改。网络连接现采用独立 60 秒等待，检查 CLI 退出码，
+超时回收子进程，错误输出脱敏。模型、预算、官方动作超时与评分没有改动。
+
+修复后 26 项离线测试通过；首题完整环境初始化再次验证通过，
+确认 ctfnet、附件复制、系统依赖与命令通道可用，全程没有模型调用或解题。
+验证容器已删除。证据为 `enigma_reproduction/generated/environment_smoke.json`。
+
+手动中断（Ctrl+C）后重跑同一 `--run` 命令会自动跳过历史批次已完成的题目，从被
+中断的题继续；被中断的题没有写入 `results.json`，因此重新尝试，已完成的有效尝试
+（含失败）保持跳过以维持 pass@1。基础设施故障与计费不完整的题会重试。若要忽略
+历史结果从头完整重跑，加 `--from-scratch`。历史失败日志保留。

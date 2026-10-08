@@ -26,9 +26,10 @@ import docker.types
 from docker.models.containers import Container
 from sweagent.utils.config import keys_config
 from sweagent.utils.log import get_logger
-from sweagent.utils.secrets import credential_free_environment
+from sweagent.utils.secrets import credential_free_environment, redact
 
 DOCKER_START_UP_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 1))
+DOCKER_NETWORK_CONNECT_TIMEOUT = 60.0
 DOCKER_COMPOSE_TERMINATION_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 100))
 DOCKER_COMPOSE_STARTUP_DELAY = float(keys_config.get("SWE_AGENT_DOCKER_START_UP_DELAY", 600))
 GITHUB_ISSUE_URL_PATTERN = re.compile(r"github\.com\/(.*?)\/(.*?)\/issues\/(\d+)")
@@ -404,18 +405,20 @@ def attach_network_interface_to_container(container_name: str) -> None:
         container_name,
     ]
     logger.debug("Attaching NIC to container with command: %s", shlex.join(cmd))
-    compose = subprocess.Popen(
-        cmd,
-        stdin=PIPE,
-        stdout=PIPE,
-        stderr=STDOUT,
-        text=True,
-        bufsize=1,  # line buffered
-    )
-    _, error = compose.communicate(timeout=DOCKER_START_UP_DELAY)
-    if error:
-        logger.error(f"Unexpected compose setup error: {error}")
-        raise RuntimeError(error)
+    try:
+        # Network attachment is a synchronous daemon operation, not the initial
+        # container polling delay. WSL can take longer than the original 1 s.
+        # run() kills and reaps the CLI process on timeout; do not leave Popen
+        # alive or silently ignore a failed connection.
+        subprocess.run(cmd, env=credential_free_environment(), capture_output=True,
+                       text=True, check=True, timeout=DOCKER_NETWORK_CONNECT_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(
+            f"Docker ctfnet connection timed out after {DOCKER_NETWORK_CONNECT_TIMEOUT:g} seconds"
+        ) from None
+    except subprocess.CalledProcessError as e:
+        detail = redact(e.stderr or e.stdout or "No Docker diagnostic output")
+        raise RuntimeError(f"Docker ctfnet connection failed: {detail}") from None
 
 
 def get_docker_compose(docker_compose_path: Path) -> Path:

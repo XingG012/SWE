@@ -84,11 +84,38 @@ def check_credential():
     return path.is_file() and path.stat().st_mode & 0o077 == 0 and bool(path.read_text().strip())
 
 
+def repository_status():
+    """Permit committed compatibility patches, while checking the v0.7 method."""
+    base = SETTINGS["upstream_commit"]
+    head = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
+    ancestry = subprocess.run(["git", "merge-base", "--is-ancestor", base, "HEAD"],
+                              cwd=ROOT, capture_output=True)
+    # Only the documented interface, accounting, logging and dependency fixes
+    # may differ in the official Python package. All other method files are pinned.
+    adapted = ("sweagent/agent/agents.py", "sweagent/agent/models.py",
+               "sweagent/agent/summarizer.py", "sweagent/environment/utils.py",
+               "sweagent/utils/config.py", "sweagent/utils/log.py")
+    original_paths = ["sweagent", "config", "trajectories/demonstrations/ctf",
+                      "docker/enigma.Dockerfile", "docker/ctf_requirements.txt"]
+    comparison = subprocess.run(["git", "diff", "--quiet", base, "--", *original_paths,
+                                 *(f":(exclude){path}" for path in adapted),
+                                 ":(exclude)sweagent/agent/deepseek_flash.py",
+                                 ":(exclude)sweagent/utils/secrets.py"], cwd=ROOT, capture_output=True)
+    working_diff = subprocess.run(["git", "diff", "--binary", "HEAD"], cwd=ROOT, capture_output=True)
+    return {"upstream_commit": base, "runtime_commit": head.stdout.strip(),
+            "v0_7_ancestor": head.returncode == 0 and ancestry.returncode == 0,
+            "original_method_files_unchanged": comparison.returncode == 0,
+            "working_tree_diff_sha256": hashlib.sha256(working_diff.stdout).hexdigest()
+                if working_diff.returncode == 0 else None}
+
+
 def preflight(image):
     problems = []
-    version = subprocess.run(["git", "rev-parse", "HEAD"], cwd=ROOT, capture_output=True, text=True)
-    if version.stdout.strip() != SETTINGS["upstream_commit"]:
-        problems.append("项目 HEAD 不是固定的官方 v0.7 commit")
+    repository = repository_status()
+    if not repository["v0_7_ancestor"]:
+        problems.append("项目不是固定的官方 v0.7 commit 或其复现补丁后继")
+    if not repository["original_method_files_unchanged"]:
+        problems.append("官方方法文件与固定的 v0.7 基线不同；只允许已记录的接口兼容与计费补丁")
     if not check_credential():
         problems.append("未加载 DEEPSEEK_API_KEY，或 .secrets/deepseek_api_key 不存在/权限不是私密")
     resolved_image = None
@@ -121,7 +148,8 @@ def preflight(image):
                     problems.append("官方类别示例缺失")
     except Exception as e:
         problems.append(f"Python 依赖或官方配置导入失败（{type(e).__name__}）")
-    report = {"ready": not problems, "blockers": problems, "resolved_image": resolved_image,
+    report = {"ready": not problems, "blockers": problems, "repository": repository,
+              "resolved_image": resolved_image,
               "model_calls_made": 0}
     GENERATED.mkdir(parents=True, exist_ok=True)
     (GENERATED / "preflight.json").write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n")
@@ -148,6 +176,27 @@ def usage_summary(path):
                        "cost_upper_usd": sum(row["cost_upper_usd"] for row in rows
                                               if row["role"] == role and row["accounting_complete"])}
                         for role in ("primary", "summarizer")}}
+
+
+def prior_completed_ids(label):
+    """IDs already recorded as completed valid attempts in earlier `label` batches.
+
+    A task counts as done when a previous results.json entry has complete accounting
+    and a non-infrastructure exit status. The interrupted task is never appended to
+    results.json, so it is re-attempted on resume; completed failed attempts stay
+    skipped to preserve pass@1 accounting. Pilot and formal runs are kept separate.
+    """
+    done = set()
+    for path in GENERATED.glob(f"{label}-*/results.json"):
+        try:
+            rows = json.loads(path.read_text())
+        except (OSError, ValueError):
+            continue
+        for row in rows:
+            if (row.get("accounting_complete") is True
+                    and row.get("exit_status") != "infrastructure_error"):
+                done.add(row.get("id"))
+    return done
 
 
 def pilot(records, image, per_instance, total, identifiers, label="pilot"):
@@ -177,6 +226,7 @@ def pilot(records, image, per_instance, total, identifiers, label="pilot"):
     directory.mkdir(mode=0o700)
     (directory / "run_config.json").write_text(json.dumps({
         "upstream_commit": SETTINGS["upstream_commit"], "settings": SETTINGS,
+        "repository": report.get("repository"),
         "resolved_image": report["resolved_image"], "selected_ids": identifiers,
         "per_instance_cost_limit": per_instance, "total_cost_limit": total,
         "inventory_sha256": sha(GENERATED / "inventory.json")}, indent=2) + "\n")
@@ -290,6 +340,8 @@ def main():
     parser.add_argument("--per-instance", type=float, default=None)
     parser.add_argument("--total", type=float, default=None)
     parser.add_argument("--ids", nargs="+", default=None)
+    parser.add_argument("--from-scratch", action="store_true",
+                        help="Ignore prior completed tasks and run the full selected set again")
     args = parser.parse_args()
     if args.per_instance is None:
         args.per_instance = (SETTINGS["pilot_per_instance_cost_limit"] if args.pilot
@@ -305,9 +357,21 @@ def main():
     if args.preflight:
         return 0 if preflight(args.image)["ready"] else 2
     if args.pilot or args.run:
+        label = "pilot" if args.pilot else "run"
         identifiers = args.ids or (SETTINGS["pilot_ids"] if args.pilot else [r["id"] for r in records])
-        return pilot(records, args.image, args.per_instance, args.total, identifiers,
-                     label="pilot" if args.pilot else "run")
+        if not args.from_scratch:
+            selected = len(identifiers)
+            identifiers = [i for i in identifiers if i not in prior_completed_ids(label)]
+            if len(identifiers) < selected:
+                print(json.dumps({"resume": True, "selected": selected,
+                                  "skipped_completed": selected - len(identifiers),
+                                  "remaining": len(identifiers)}, ensure_ascii=False))
+        if not identifiers:
+            print(json.dumps({"remaining": 0,
+                              "message": "All selected tasks already have completed results; nothing to run."},
+                             ensure_ascii=False))
+            return 0
+        return pilot(records, args.image, args.per_instance, args.total, identifiers, label=label)
     return 0
 
 
