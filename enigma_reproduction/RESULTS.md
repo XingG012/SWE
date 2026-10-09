@@ -43,18 +43,18 @@ API 次数也完全一致。65 次调用均记录有效 token usage、缓存量�
 - 同目录每题的 `*-usage.jsonl` 和 `*-steps.jsonl`
 - 每题的 `trajectory_dir` 指向 `trajectories/xing/` 下的原始日志、`.traj`、配置与预测
 
-根据用户最新要求，当前正式运行预算设为每题 **0.2 USD**，整批需明确指定，命令为：
+根据用户最新要求，当前正式运行预算设为每题 **0.1 USD**，整批需明确指定，命令为：
 
 ```bash
 cd /home/xing/SWE-agent
 sudo service docker start
-.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.1 --total 20
 ```
 
 预算采用官方响应后停止阈值口径，可能超过阈值一个在途请求费用。
-0.2 USD 是用户指定的额度，不是对 200 题成本或成功率的保证。
+0.1 USD 是用户指定的额度，不是对 200 题成本或成功率的保证。
 上述历史诊断结果的预算仍为每题 3 USD / 整批 9 USD，没有重新运行或改写历史指标。
-`--run` 才会启动完整测试；新的诊断入口 `--pilot` 也改为每题 0.2 USD / 整批 0.6 USD。
+`--run` 才会启动完整测试；新的诊断入口 `--pilot` 也改为每题 0.1 USD / 整批 0.3 USD。
 新运行的日志统一为 `logs/deepseek-flash/题目名_时间戳.log`，每题一个文件；
 开头为主要指标，后面为解题过程。原数值 ledger 和官方轨迹继续保留于辅助目录。
 所有 200 题附件现已齐全，正式命令只使用固定官方镜像及 DeepSeek Flash。

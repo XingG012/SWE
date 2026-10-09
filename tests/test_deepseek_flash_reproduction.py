@@ -378,6 +378,57 @@ def test_resume_skips_completed_but_retries_infra_and_interrupted(tmp_path, monk
     assert runner.prior_completed_ids("pilot") == {"pilot-only"}
 
 
+def test_split_chunks_is_contiguous_and_capped():
+    import enigma_reproduction.run_nyu as runner
+    ids = [f"t{i}" for i in range(200)]
+    chunks = runner.split_chunks(ids, 4)
+    assert [len(c) for c in chunks] == [50, 50, 50, 50]
+    assert [i for c in chunks for i in c] == ids
+    assert runner.split_chunks(ids[:3], 4) == [["t0"], ["t1"], ["t2"]]
+
+
+def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch):
+    import os
+    import docker
+    import run
+    import enigma_reproduction.run_nyu as runner
+
+    generated = tmp_path / "generated"
+    generated.mkdir()
+    (generated / "inventory.json").write_text("{}")
+    monkeypatch.setattr(runner, "ROOT", tmp_path)
+    monkeypatch.setattr(runner, "GENERATED", generated)
+    monkeypatch.setattr(runner, "preflight", lambda image: {"ready": True, "resolved_image": "sha256:test"})
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-log-credential")
+    monkeypatch.setenv("ENIGMA_USAGE_LEDGER", "unused-test-ledger")
+    monkeypatch.setattr(docker, "from_env", Mock(return_value=Mock()))
+    config = str(Path("config/ctf/ctf_crypto.yaml").resolve())
+    records = [{"id": "nyu-test-a", "name": "First", "category": "crypto",
+                "path": str(tmp_path), "missing_attachments": [], "config": config},
+               {"id": "nyu-test-b", "name": "Second", "category": "crypto",
+                "path": str(tmp_path), "missing_attachments": [], "config": config}]
+    statuses = iter(["exit_error", "submitted"])
+
+    class OfflineMain:
+        def __init__(self, args, *, log_path):
+            add_file_handler(log_path)
+            self.agent = SimpleNamespace(info={"exit_status": next(statuses)},
+                model=Mock(), summarizer_model=Mock(), add_hook=lambda hook: setattr(self, "hook", hook))
+            self.env = Mock()
+            self.traj_dir = tmp_path / "trajectory"
+
+        def run(self, index):
+            Path(os.environ["ENIGMA_USAGE_LEDGER"]).write_text(json.dumps({"role": "primary",
+                "accounting_complete": True, "prompt_tokens": 100, "completion_tokens": 5,
+                "cache_hit_tokens": 20, "cost_upper_usd": .02, "cost_lower_usd": .01}) + "\n")
+
+    monkeypatch.setattr(run, "Main", OfflineMain)
+    assert runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-a", "nyu-test-b"], label="run") == 0
+    rows = json.loads(next(generated.glob("run-*/results.json")).read_text())
+    assert [r["id"] for r in rows] == ["nyu-test-a", "nyu-test-b"]
+    assert [r["exit_status"] for r in rows] == ["exit_error", "submitted"]
+
+
 def test_network_connection_has_own_timeout_and_no_credential_environment(monkeypatch):
     import sweagent.environment.utils as utils
     monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-network-credential")

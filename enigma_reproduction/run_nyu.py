@@ -179,12 +179,15 @@ def usage_summary(path):
 
 
 def prior_completed_ids(label):
-    """IDs already recorded as completed valid attempts in earlier `label` batches.
+    """IDs already recorded as finished attempts in earlier `label` batches.
 
-    A task counts as done when a previous results.json entry has complete accounting
-    and a non-infrastructure exit status. The interrupted task is never appended to
-    results.json, so it is re-attempted on resume; completed failed attempts stay
-    skipped to preserve pass@1 accounting. Pilot and formal runs are kept separate.
+    A task counts as done once a previous results.json entry carries a terminal
+    exit status other than `infrastructure_error`, regardless of accounting
+    completeness. A `exit_error` task may have an `accounting_complete: False`
+    ledger entry (the model call failed), but it is still a completed failed
+    attempt and must stay skipped to preserve pass@1. The interrupted task is
+    never appended to results.json, so it is re-attempted on resume. Pilot and
+    formal runs are kept separate.
     """
     done = set()
     for path in GENERATED.glob(f"{label}-*/results.json"):
@@ -193,10 +196,105 @@ def prior_completed_ids(label):
         except (OSError, ValueError):
             continue
         for row in rows:
-            if (row.get("accounting_complete") is True
-                    and row.get("exit_status") != "infrastructure_error"):
+            status = row.get("exit_status")
+            if status not in (None, "interrupted", "infrastructure_error"):
                 done.add(row.get("id"))
     return done
+
+
+def split_chunks(items, workers):
+    """Split `items` into at most `workers` contiguous chunks, dropping empty ones."""
+    size = math.ceil(len(items) / workers) if workers > 0 else len(items)
+    return [items[i:i + size] for i in range(0, len(items), size)]
+
+
+def load_inventory_records():
+    """Reuse the inventory written by `prepare()` so workers skip the dataset scan."""
+    return json.loads((GENERATED / "inventory.json").read_text())["records"]
+
+
+def count_batch_progress(before):
+    """Count tasks finished so far across this batch's result directories.
+
+    Workers append to their own `run-*/results.json` after every task, so the
+    entry count is the number of completed tasks in the current batch.
+    """
+    completed = 0
+    for name in {p.name for p in GENERATED.glob("run-*")} - before:
+        path = GENERATED / name / "results.json"
+        if path.is_file():
+            try:
+                completed += len(json.loads(path.read_text()))
+            except (OSError, ValueError):
+                continue
+    return completed
+
+
+def run_in_parallel(records, image, per_instance, total, identifiers, workers, from_scratch):
+    """Split the run across `workers` subprocesses and wait for all of them.
+
+    Each worker is a separate process writing its own `run-*/results.json`, ledger and
+    logs, so no shared process-global state (logger, ENIGMA_USAGE_LEDGER, spent) is
+    crossed. The parent divides `total` proportionally to chunk size and reports a
+    combined tally from the result directories created by this batch.
+    """
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    log_dir = GENERATED / f"parallel-{stamp}"
+    log_dir.mkdir(mode=0o700)
+    before = {p.name for p in GENERATED.glob("run-*")}
+    chunks = split_chunks(identifiers, workers)
+    script = str(Path(__file__).resolve())
+    children = []
+    for index, chunk in enumerate(chunks, start=1):
+        worker_total = total * len(chunk) / len(identifiers)
+        argv = [sys.executable, script, "--run", "--reuse-inventory",
+                "--per-instance", repr(per_instance), "--total", repr(worker_total),
+                "--num-workers", "1", "--ids", *chunk]
+        if from_scratch:
+            argv.append("--from-scratch")
+        log = open(log_dir / f"worker-{index}.log", "wb")
+        children.append((index, len(chunk),
+                         subprocess.Popen(argv, cwd=str(ROOT), stdout=log, stderr=subprocess.STDOUT),
+                         log))
+        print(json.dumps({"worker": index, "count": len(chunk),
+                          "total_cost_limit": worker_total,
+                          "log": str(log_dir / f"worker-{index}.log")}, ensure_ascii=False))
+    codes = []
+    interval = SETTINGS.get("progress_interval_seconds", 300)
+    last_report = time.monotonic()
+    while True:
+        alive = [entry for entry in children if entry[2].poll() is None]
+        if not alive:
+            break
+        if time.monotonic() - last_report >= interval:
+            completed = count_batch_progress(before)
+            print(json.dumps({"progress": {"completed": completed,
+                                           "remaining": len(identifiers) - completed,
+                                           "total": len(identifiers)}},
+                             ensure_ascii=False))
+            last_report = time.monotonic()
+        time.sleep(10)
+    for index, count, proc, log in children:
+        code = proc.wait()
+        log.close()
+        codes.append((index, count, code))
+        print(json.dumps({"worker": index, "count": count, "exit_code": code}, ensure_ascii=False))
+    batch_dirs = sorted({p.name for p in GENERATED.glob("run-*")} - before)
+    results = []
+    for name in batch_dirs:
+        path = GENERATED / name / "results.json"
+        if path.is_file():
+            try:
+                results.extend(json.loads(path.read_text()))
+            except (OSError, ValueError):
+                continue
+    solved = [r for r in results if r.get("solved") and r.get("accounting_complete")]
+    summary = {"workers": len(chunks), "attempted": len(results), "solved": len(solved),
+               "known_cost_upper_usd": sum(r.get("known_cost_upper_usd") or 0 for r in results),
+               "exit_codes": {index: code for index, _, code in codes},
+               "result_directories": batch_dirs, "worker_logs": str(log_dir)}
+    print(json.dumps(summary, ensure_ascii=False))
+    return 0 if all(code == 0 for _, _, code in codes) else 2
 
 
 def pilot(records, image, per_instance, total, identifiers, label="pilot"):
@@ -234,7 +332,12 @@ def pilot(records, image, per_instance, total, identifiers, label="pilot"):
     spent = 0.0
     client = docker.from_env(timeout=5)
     if not client.networks.list(names=["ctfnet"]):
-        client.networks.create("ctfnet")
+        try:
+            client.networks.create("ctfnet")
+        except docker.errors.APIError:
+            # A concurrent worker may have created the network between the checks.
+            if not client.networks.list(names=["ctfnet"]):
+                raise
     client.close()
     for identifier in identifiers:
         remaining = total - spent
@@ -296,8 +399,14 @@ def pilot(records, image, per_instance, total, identifiers, label="pilot"):
         results.append(result)
         (directory / "results.json").write_text(json.dumps(results, indent=2, ensure_ascii=False) + "\n")
         print(json.dumps(result, ensure_ascii=False))
-        if not result["accounting_complete"] or result["exit_status"] in {"infrastructure_error", "exit_error"}:
-            break
+        # Never halt the batch on a single task's failure. Every exit status is a
+        # recorded result — including `exit_error` (failed model call, possibly
+        # `accounting_complete: False`) and `infrastructure_error` (e.g. a
+        # per-task container timeout like this run's haySTACK). The loop only
+        # stops when the budget is spent or all selected tasks are done. Truly
+        # fatal host failures are caught by `preflight()` before this loop, and a
+        # manual interrupt still aborts cleanly without writing the in-flight
+        # task, so resume re-attempts it.
     solved_costs = [r["cost_upper_usd"] for r in results if r["solved"] and r["accounting_complete"]]
     valid = [r for r in results if r["accounting_complete"] and r["exit_status"] != "infrastructure_error"]
     summary = {"attempted": len(results), "solved": len(solved_costs),
@@ -342,7 +451,12 @@ def main():
     parser.add_argument("--ids", nargs="+", default=None)
     parser.add_argument("--from-scratch", action="store_true",
                         help="Ignore prior completed tasks and run the full selected set again")
+    parser.add_argument("--num-workers", type=int, default=1,
+                        help="Split a --run into this many parallel processes")
+    parser.add_argument("--reuse-inventory", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
+    if args.num_workers < 1:
+        parser.error("--num-workers must be at least 1")
     if args.per_instance is None:
         args.per_instance = (SETTINGS["pilot_per_instance_cost_limit"] if args.pilot
                              else SETTINGS["per_instance_cost_limit"])
@@ -353,7 +467,7 @@ def main():
     if any(not math.isfinite(v) or v <= 0 for v in (args.per_instance, args.total)):
         parser.error("Both budget limits must be finite and strictly positive")
     os.chdir(ROOT)
-    records = prepare()
+    records = load_inventory_records() if args.reuse_inventory else prepare()
     if args.preflight:
         return 0 if preflight(args.image)["ready"] else 2
     if args.pilot or args.run:
@@ -371,6 +485,9 @@ def main():
                               "message": "All selected tasks already have completed results; nothing to run."},
                              ensure_ascii=False))
             return 0
+        if args.run and args.num_workers > 1 and not args.reuse_inventory:
+            return run_in_parallel(records, args.image, args.per_instance, args.total,
+                                   identifiers, args.num_workers, args.from_scratch)
         return pilot(records, args.image, args.per_instance, args.total, identifiers, label=label)
     return 0
 

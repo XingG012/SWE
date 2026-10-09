@@ -30,11 +30,11 @@
 | 评分 | 官方 `SWEEnv.validate_submission`，保留原精确匹配及 `flag{...}` 包装规则；只把 `exit_status == submitted` 计为成功 |
 | 容器 | 官方 `sweagent/enigma`，解析后按不可变 image ID 运行；不用 `ctfenv` 或 `ctfenv:multiagent` 替代 |
 | 模型 | 主智能体和摘要均为 `deepseek-flash`；仅 OpenAI 兼容端点 `https://api.deepseek.com` |
-| 当前预算 | 正式运行及新试跑均为每题 0.2 USD；正式整批命令为 40 USD，默认三题试跑整批为 0.6 USD |
+| 当前预算 | 正式运行及新试跑均为每题 0.1 USD；正式整批命令为 20 USD，默认三题试跑整批为 0.3 USD |
 
 三题真实试跑已完成：2 题成功，1 题格式停止，总费用上界约 0.153 USD。
 详见 [试跑结果](RESULTS.md)。历史诊断试跑使用每题 3 USD / 整批 9 USD；随后按用户要求，
-当前正式运行和新试跑默认每题 **0.2 USD**。正式整批预算必须通过 `--total` 明确指定。
+当前正式运行和新试跑默认每题 **0.1 USD**。正式整批预算必须通过 `--total` 明确指定。
 没有将两道成功样本的成本推广为整个测试集的平均成本。
 
 论文表 6 为 crypto 53、forensics 15、pwn 38、rev 51、misc 24、web 19。
@@ -50,7 +50,7 @@
 
 `/home/xing/llm_ctf_automation_qwen_3/` 可访问。只读查看模型接口与预算参考：
 原 baseline 的默认成本上限为 10 USD，部分配置输出上限为 4096 tokens；没有导入其提示词、
-规划器、执行器、日志、方法配置或工具。历史诊断试跑每题 3 USD 来自 EnIGMA 论文；当前每题 0.2 USD 由用户指定。
+规划器、执行器、日志、方法配置或工具。历史诊断试跑每题 3 USD 来自 EnIGMA 论文；当前每题 0.1 USD 由用户指定。
 
 ## 模型与计费差异
 
@@ -166,7 +166,7 @@ docker build --platform linux/amd64 -f docker/enigma.Dockerfile -t enigma:v0.7-0
 
 默认诊断题为 `2017q-cry-another_xor`、`2019q-rev-beleaf`、`2018q-msc-short_circuit`。
 它们有完整附件且不需要题目服务；选题没有查看标准 flag 或旧解题轨迹，不包含泄漏 flag 的玩具题。
-新试跑默认每题 0.2 USD、整批 0.6 USD，与当前正式运行的每题预算相同。
+新试跑默认每题 0.1 USD、整批 0.3 USD，与当前正式运行的每题预算相同。
 不能根据三道诊断题估计整个 NYU 数据集的普遍解题成本或成功率。
 
 本次已成功下载并验证的官方镜像固定为：
@@ -175,13 +175,13 @@ docker build --platform linux/amd64 -f docker/enigma.Dockerfile -t enigma:v0.7-0
 tshark、sqlmap、Ghidra analyzeHeadless 与所需 Python CTF 包可用。
 初次拉取遇到网络 EOF，第二次重试成功；没有换用其他项目镜像。
 
-完整测试由用户手动启动，必须明确填写整批预算。下面给出每题 0.2 USD、整批 40 USD 的
+完整测试由用户手动启动，必须明确填写整批预算。下面给出每题 0.1 USD、整批 20 USD 的
 命令形式；每题预算由用户指定，不是已验证的最佳预算。
 入口检查附件完整性，不会静默忽略缺失题目。目前缺失附件已补齐。
 
 ```bash
 sudo service docker start
-.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.1 --total 20
 ```
 
 ### 断点续跑
@@ -195,15 +195,33 @@ sudo service docker start
 - 基础设施故障（`infrastructure_error`）与计费不完整（`accounting_complete` 为假）也会重试。
 
 ```bash
-.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.2 --total 40
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.1 --total 20
 ```
 
 重新运行时 `--total` 作用于剩余题目，可按剩余预算填写。若确需从头完整重跑，
 加 `--from-scratch` 忽略历史结果。正式运行与试跑的已完成记录互不影响。
 
+### 多进程分块并行
+
+同一模型可将整批拆成多个子进程并行解题（`--run` 专用）。`--num-workers N` 把
+题目切成 N 个连续分块，每个分块一个独立子进程，各自写独立的 `run-*/results.json`、
+usage ledger 与日志；父进程按分块大小等分 `--total`，全部结束后汇总本次成功数与
+已知费用上界。
+
+```bash
+sudo service docker start
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.1 --total 20 --num-workers 4
+```
+
+每个 worker 的完整输出另存于 `enigma_reproduction/generated/parallel-*/worker-*.log`，
+父进程在标准输出打印每个 worker 的分块大小、退出码和汇总结果。并行度受 Docker
+容器资源与 API 速率限制约束；server 类题并发时宿主端口可能冲突，如遇冲突可减少
+worker 数或对这类题改回串行。断点续跑与并行兼容：重跑会自动跳过所有已完成题目后
+再重新分块。
+
 正式运行和试跑的可读日志统一保存在 Git 忽略的 **`logs/deepseek-flash/`**，
 每题只有一个 `.log` 文件，例如 `Beleaf_20261008_180000_123456.log`。
-开头约十行列出题目、成功/退出状态、0.2 USD 预算、费用上下界、步骤、主/摘要调用次数、
+开头约十行列出题目、成功/退出状态、0.1 USD 预算、费用上下界、步骤、主/摘要调用次数、
 token/缓存统计、各项耗时、工具频次及原始数据路径；后面连续保存提示、思考、动作、
 每步响应与观察。运行中日志持续写入，开头状态为 `running`；结束或 Ctrl+C 时填入最终指标。
 进程被 SIGKILL 或机器断电时无法执行收尾，可能仍显示 `running`，过程记录保留。
