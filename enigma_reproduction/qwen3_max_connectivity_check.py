@@ -68,10 +68,15 @@ def main():
             model = get_model(ModelArguments(model_name="qwen3-max", per_instance_cost_limit=.1))
             barrier.wait(timeout=30)
             requested = time.perf_counter()
-            text = model.query([{"role": "user", "content": f"Reply with exactly OK{index}."}])
-            return {"worker": index, "ok": text.strip() == f"OK{index}", "answer": redact(text),
+            text = model.query([{"role": "user", "content":
+                f"Return one fenced shell command: echo OK{index}. Do not run it or simulate its output."}])
+            from sweagent.agent.parsing import ThoughtActionParser
+            _, action = ThoughtActionParser()(text, [])
+            return {"worker": index, "ok": action.strip() == f"echo OK{index}", "answer": redact(text),
                     "request_started": requested, "request_finished": time.perf_counter(),
                     "cost_estimate_usd": model.stats.instance_cost,
+                    "reasoning_tokens": model._reasoning_tokens,
+                    "finish_reason": model._finish_reason,
                     "prompt_tokens": model.stats.tokens_sent, "completion_tokens": model.stats.tokens_received}
         except Exception as error:
             return {"worker": index, "ok": False, "elapsed_seconds": time.perf_counter() - started,
@@ -85,7 +90,8 @@ def main():
     success = all(row["ok"] for row in results)
     overlaps = success and max(row["request_started"] for row in results) < min(
         row["request_finished"] for row in results)
-    report = {"ok": success, "model": "qwen3-max", "enable_thinking": True,
+    report = {"ok": success, "model": "qwen3-max", "enable_thinking": settings["enable_thinking"],
+              "thinking_budget": settings.get("thinking_budget"),
               "workers": args.num_workers, "requests_overlapped": overlaps,
               "results": results, "report_directory": str(directory)}
     (directory / "report.json").write_text(json.dumps(report, indent=2) + "\n")

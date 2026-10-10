@@ -54,13 +54,28 @@ def test_stream_usage_and_reasoning_accounting(qwen, tmp_path):
     assert qwen.client.chat.completions.create.call_args.kwargs == {
         "model": "qwen3-max", "messages": [{"role": "user", "content": "challenge"}],
         "temperature": 0, "top_p": .95, "max_tokens": 4096,
-        "extra_body": {"enable_thinking": True}, "stream": True,
+        "extra_body": {"enable_thinking": False}, "stream": True,
+        "stop": ["\n(Open file:", "\n(Current directory:", "\nbash-$"],
         "stream_options": {"include_usage": True}}
     stream.close.assert_called_once()
-    assert qwen.stats.instance_cost == pytest.approx((1000*.359 + 100*1.434)/1e6)
+    assert qwen.stats.instance_cost == pytest.approx((800*.359 + 200*.359*.2 + 100*1.434)/1e6)
     assert qwen.stats.tokens_received == 100  # reasoning already included
     row = json.loads((tmp_path / "usage.jsonl").read_text())
     assert row["reasoning_tokens"] == 30 and row["cache_hit_tokens"] == 200
+    assert row["reference_cost_without_cache_discount_usd"] == pytest.approx((1000*.359+100*1.434)/1e6)
+    assert row["enable_thinking"] is False and row["thinking_budget"] is None
+    assert row["response_normalization"] == "first_complete_command"
+    assert "thinking_budget_honored" not in row
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_thinking_budget_sent_only_when_thinking_enabled(qwen, enabled):
+    qwen.settings.update(enable_thinking=enabled, thinking_budget=2048)
+    qwen.client.chat.completions.create.return_value = streamed_response()
+    qwen.query([])
+    extra = qwen.client.chat.completions.create.call_args.kwargs["extra_body"]
+    assert extra == ({"enable_thinking": True, "thinking_budget": 2048}
+                     if enabled else {"enable_thinking": False})
 
 
 @pytest.mark.parametrize("prompt,input_rate,output_rate", [
@@ -68,8 +83,9 @@ def test_stream_usage_and_reasoning_accounting(qwen, tmp_path):
     (131073,1.004,4.014), (262144,1.004,4.014), (1000,.359,1.434)])
 def test_request_context_tiers_and_cache_reference_estimate(qwen, prompt, input_rate, output_rate):
     qwen._costs(200000, 100, 0)
-    assert qwen._costs(prompt, 100, prompt // 2)["peak"] == pytest.approx(
-        (prompt*input_rate + 100*output_rate)/1e6)
+    hit = prompt // 2
+    assert qwen._costs(prompt, 100, hit)["peak"] == pytest.approx(
+        ((prompt-hit)*input_rate + hit*input_rate*.2 + 100*output_rate)/1e6)
 
 
 def test_missing_stream_usage_stops_and_does_not_return_answer(qwen, tmp_path):
@@ -127,7 +143,8 @@ def test_resume_separates_qwen_thinking_and_other_models(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "SETTINGS", settings)
     monkeypatch.setattr(runner, "EXPERIMENT", settings["experiment"])
     monkeypatch.setattr(runner, "GENERATED", tmp_path)
-    for index, changes in enumerate([{}, {"enable_thinking": False}, {"model": "gpt-5.4"},
+    for index, changes in enumerate([{}, {"enable_thinking": True}, {"thinking_budget": 4096},
+                                     {"output_protocol": "legacy"}, {"stop_sequences": []}, {"model": "gpt-5.4"},
                                      {"base_url": "https://other.invalid/v1"}]):
         directory = tmp_path / f"run-{index}"
         directory.mkdir()
@@ -149,13 +166,34 @@ def test_qwen_cohort_is_exactly_82_baseline_successes_without_gpt_outcomes(monke
     baseline = json.loads(Path("enigma_reproduction/gpt54_deepseek82_tasks.json").read_text())
     assert cohort["selected_ids"] == baseline["selected_ids"]
     assert len(cohort["selected_ids"]) == 82
-    assert cohort["already_solved_ids"] == cohort["already_failed_ids"] == []
+    assert set(cohort["already_solved_ids"]) == {"2019f-msc-alive", "2019q-rev-beleaf"}
+    assert cohort["already_failed_ids"] == []
+    assert set(cohort["carried_success_evidence"]) == set(cohort["already_solved_ids"])
     assert set(settings["pilot_ids"]).issubset(cohort["selected_ids"])
     for task in cohort["tasks"]:
         evidence = task["deepseek_success_evidence"]
         assert runner.sha(Path(evidence["log_file"])) == evidence["log_sha256"]
         rows = json.loads(Path(evidence["result_file"]).read_text())
         assert any(row["id"] == task["id"] and row["solved"] for row in rows)
+
+
+def test_restart_carries_two_successes_and_preserves_resume(tmp_path, monkeypatch):
+    settings = json.loads(Path("enigma_reproduction/qwen3_max_settings.json").read_text())
+    monkeypatch.setattr(runner, "SETTINGS", settings)
+    monkeypatch.setattr(runner, "GENERATED", tmp_path)
+    records, _ = runner.dataset()
+    monkeypatch.setattr(runner, "prior_completed_ids", lambda *args: set())
+    args = NS(pilot=False, ids=None, skip_ids=None, from_scratch=False,
+              per_instance=.1, total=8.2, dry_run=True, num_workers=3)
+    assert runner.run_selected(records, args) == 0
+    preview = json.loads((tmp_path / "selection-preview.json").read_text())
+    assert preview["selected_count"] == 82 and preview["remaining_count"] == 80
+    assert set(preview["skipped_ids"]) == {"2019f-msc-alive", "2019q-rev-beleaf"}
+    completed = preview["pending_ids"][0]
+    monkeypatch.setattr(runner, "prior_completed_ids", lambda *args: {completed})
+    assert runner.run_selected(records, args) == 0
+    preview = json.loads((tmp_path / "selection-preview.json").read_text())
+    assert preview["remaining_count"] == 79 and completed not in preview["pending_ids"]
 
 
 def test_explicit_skip_can_move_past_interrupted_task(tmp_path, monkeypatch):
@@ -173,3 +211,78 @@ def test_explicit_skip_can_move_past_interrupted_task(tmp_path, monkeypatch):
     args.skip_ids = ["unknown"]
     with pytest.raises(ValueError, match="Skipped IDs"):
         runner.run_selected(records, args)
+
+
+def test_first_command_drops_invented_later_turns_and_hidden_thought(qwen):
+    raw = "<think>private ```code```</think>\nDISCUSSION\nInspect files\n```bash\nls\n```\n" \
+          "file.py\n(Open file: n/a)\nbash-$\n```\nsubmit 'invented'\n```"
+    assert qwen.first_command(raw) == "DISCUSSION\nInspect files\n```\nls\n```"
+
+
+@pytest.mark.parametrize("content", ["", "DISCUSSION only", "```\nls", "```\n\n```",
+    "```python\nprint('invented flag')\n```", "```\ndef solve():\n    pass\n```",
+    "(Open file: n/a)\n```\nls\n```", "<think>unclosed\n```\nls\n```"])
+def test_incomplete_or_non_action_output_is_rejected(qwen, content):
+    with pytest.raises(ValueError):
+        qwen.first_command(content)
+
+
+def test_multiline_editor_and_heredoc_are_preserved(qwen):
+    for command in ["edit 1:1\nimport os\nprint(os.getcwd())\nend_of_edit\n",
+                    "python3 <<'PY'\nimport os\nprint(os.getcwd())\nPY\n"]:
+        assert qwen.first_command("DISCUSSION\nWrite code\n```\n"+command+"```\nFake output") == \
+            "DISCUSSION\nWrite code\n```\n"+command+"```"
+
+
+def empty_response():
+    stream = Mock()
+    stream.__iter__ = Mock(return_value=iter([NS(model="qwen3-max", usage=NS(
+        prompt_tokens=1000, completion_tokens=100), choices=[])]))
+    return stream
+
+
+def test_empty_reply_retries_with_usage_charged_without_polluting_history(qwen, tmp_path):
+    qwen.client.chat.completions.create.side_effect = [empty_response(), streamed_response()]
+    history = [{"role": "user", "content": "challenge", "agent": "primary"}]
+    answer = qwen.query(history)
+    assert answer.endswith("```\nls\n```")
+    assert qwen.stats.api_calls == 2 and len(history) == 1
+    messages = qwen.client.chat.completions.create.call_args.kwargs["messages"]
+    assert len(messages) == 2 and "do not simulate" in messages[-1]["content"]
+    rows = [json.loads(line) for line in (tmp_path / "usage.jsonl").read_text().splitlines()]
+    assert len(rows) == 2 and all(row["accounting_complete"] for row in rows)
+    assert rows[0]["response_normalization"] == "missing_command"
+    assert qwen.stats.instance_cost == pytest.approx(sum(row["cost_upper_usd"] for row in rows))
+
+
+def test_empty_reply_retries_are_bounded(qwen, tmp_path):
+    qwen.client.chat.completions.create.side_effect = [empty_response(), empty_response()]
+    with pytest.raises(RuntimeError, match="after 2 charged requests"):
+        qwen.query([])
+    assert qwen.stats.api_calls == 2
+
+
+def test_summarizer_keeps_free_text_and_has_no_solver_stop_sequences(qwen):
+    qwen.accounting_role = "summarizer"
+    stream = Mock()
+    stream.__iter__ = Mock(return_value=iter([NS(model="qwen3-max", usage=NS(
+        prompt_tokens=1000, completion_tokens=100), choices=[NS(index=0, finish_reason="stop",
+        delta=NS(content="Summary: important files and observations."))])]))
+    qwen.client.chat.completions.create.return_value = stream
+    assert qwen.query([]) == "Summary: important files and observations."
+    assert "stop" not in qwen.client.chat.completions.create.call_args.kwargs
+
+
+@pytest.mark.parametrize("command", ["open server.py", "create solve.py", "open checker.py"])
+def test_simulated_transcripts_select_the_first_actual_action(qwen, command):
+    from sweagent.agent.parsing import ThoughtActionParser
+    # Reproduce the old failure without depending on disposable experiment logs.
+    response = ("DISCUSSION\nInspect the challenge\n```\n" + command + "\n```\n"
+                "(Open file: challenge.py)\n(Current directory: /challenge)\nbash-$\n"
+                "Invented observation\n```\npython solve.py\n```\n")
+    _, old_action = ThoughtActionParser()(response, [])
+    assert old_action.strip() == "python solve.py"
+    normalized = qwen.first_command(response)
+    _, action = ThoughtActionParser()(normalized, [])
+    assert action.strip() == command
+    assert normalized.count("```") == 2 and "bash-$" not in normalized

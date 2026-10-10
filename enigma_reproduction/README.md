@@ -487,18 +487,24 @@ finish reason。每题记录初始化时间、总耗时、步数、工具调用�
 
 ### Qwen3-Max：DeepSeek 成功的 82 题
 
-使用 `qwen3_max_settings.json` 和固定 SHA256 的 `qwen3_max_deepseek82_tasks.json`。
+使用 `qwen3_max_settings.json` 和固定 SHA256 的 `qwen3_max_deepseek82_carry2_tasks.json`。
 该清单与 GPT 实验的 DeepSeek 成功 82 题完全一致，保留每道题的 DeepSeek 成功证据，
-但不继承 GPT 的成功或失败结果。传入 `--ids` 也只能从这 82 题中选择。
+但不继承 GPT 的成功或失败结果。按用户要求保留 Qwen 已成功的 A Poem For You
+和 beleaf，重新运行其余 80 题。两题成功来自启用 thinking 的 v2 实验，证据和来源
+配置记录在清单的 `carried_success_evidence` 中；统计时应与本轮关闭 thinking 的结果区分。
+传入 `--ids` 也只能从这 82 题中选择。
 凭据读取 `DASHSCOPE_API_KEY` 或权限 `0600` 的 `.secrets/dashscope_api_key`。
 
 OpenAI 兼容地址为
 `https://llm-c83fttgtl5nbioqs.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。
 DashScope 原生地址记录在设置中，当前适配器使用 OpenAI 兼容接口。
-请求启用 `enable_thinking=true` 和流式输出，通过 `stream_options.include_usage=true`
-读取最终 usage；仅最终回复进入动作解析，思考 token 已包含在 completion token 费用中。
+请求显式设置 `enable_thinking=false`，不发送 `thinking_budget`。使用流式输出，
+通过 `stream_options.include_usage=true` 读取最终 usage；仅最终回复进入动作解析。
 主模型与摘要模型共用每题 0.1 USD 预算。费用按官方北京地域的美元列表价逐请求阶梯估算，
-保守地不扣除缓存折扣；专属端点的实际合同账单可能不同。
+API 报告的缓存命中 token 按标准输入单价的 20% 估算，其余输入按全价计费。
+专属端点的实际合同账单可能不同；如合同缓存价格不同，调整设置中的
+`pricing.implicit_cache_multiplier`。账本同时保存不扣缓存折扣的参考费用
+`reference_cost_without_cache_discount_usd`，用于核对预算口径。
 参考：[官方价格](https://www.alibabacloud.com/help/en/model-studio/model-pricing)、
 [流式 usage](https://help.aliyun.com/en/model-studio/stream)。
 
@@ -510,22 +516,44 @@ API 超时或人工中断时没有返回的用量标记为未知，不假定费�
 # 默认 3 路并行；Ctrl+C 停止后，再执行同一命令自动续跑。
 bash enigma_reproduction/run_qwen3_max.sh
 
+# 可选：直接并行复测三题，不做百炼连接检查。
+bash enigma_reproduction/run_qwen3_max_smoke.sh
+
 # 切换到 2 或 4 路并行，同一实验仍按历史完成记录续跑。
 bash enigma_reproduction/run_qwen3_max.sh --num-workers 2
 bash enigma_reproduction/run_qwen3_max.sh --num-workers 4
 
-# 只预览题目选择，或进行 4 个极短请求的接口检查。
+# 只预览题目选择，不发模型请求。
 bash enigma_reproduction/run_qwen3_max.sh --dry-run
-.venv-enigma/bin/python enigma_reproduction/qwen3_max_connectivity_check.py --num-workers 4
 ```
 
 可读日志统一写入 `logs/qwen3-max/题目名_上海时间.log`；不同 worker 使用独立进程、
 结果目录、费用账本、日志和解题容器。父进程批次输出位于
 `enigma_reproduction/generated/parallel-*/worker-*.log`。
-默认实验 ID 为 `qwen3-max-deepseek82-20261010`，重新运行时保持该 ID；
+两个启动脚本均直接开始解题，不执行百炼连接检查。
+当前实验 ID 为 `qwen3-max-deepseek82-no-thinking-carry2-20261010`，重新运行时保持该 ID；
 改用 `--experiment 新名称` 可建立独立实验。
 同一实验的第二个启动器会被锁阻止，以免重复解题；需要 2–4 路时使用 `--num-workers`。
 如只想跳过问题题目，可运行 `bash enigma_reproduction/run_qwen3_max.sh --skip-ids 题目ID`，
 或用 `--ids` 指定清单中的部分题目。`--skip-ids` 仅作用于本次启动，后续续跑若仍想排除
 这些题，应保留同一参数；
 基础设施/API 故障默认保留待重试状态，不会被记为有效的 pass@1 失败。
+
+修正版保留官方六类别提示词、demonstrations、ACI、摘要与评分流程。只在 Qwen
+适配层做以下处理，实验结果应注明 `first_command_v1`，与原始模型输出直接进入最后
+代码块解析器的运行区分：
+
+- 显式设置 `enable_thinking=false`，与 DeepSeek 实验一样关闭 thinking；回复长度为 `max_tokens=4096`。
+- 为解题请求设置终端提示符停止词，减少模拟后续终端轮次。摘要请求不带这些停止词。
+- 只保留回复的第一个完整 shell 命令块及此前 discussion；后续模拟输出和动作不进入
+  官方动作解析器或下一轮历史。完整 `<think>...</think>` 区块也不进入历史。
+- 拒绝不完整代码块、空命令和裸 Python 代码；最多重试一次。重试照常计入主/摘要
+  共用预算，不把未执行的模拟输出作为事实返回给模型。
+- 空回复已有的 usage 正常计费，再做一次有上限的格式纠正；缺失 usage 或接口失败
+  不使用这条回复纠正路径，也不会被当成零费用。
+
+每次主模型请求的 usage 账本保留 `raw_response`、`response_normalization`、
+`output_attempt`、`enable_thinking`，可比较原回复和实际执行命令。
+旧配置已保存为 `qwen3_max_legacy_settings.json`；最初的 19 题日志和结果已按要求删除。
+此前实验的失败结果不会被当前实验复用，仅显式保留清单中的两题成功。
+历史实验可用该配置显式运行，但不会被修正版实验的续跑判断混用。

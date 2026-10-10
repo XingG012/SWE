@@ -261,7 +261,8 @@ def prior_completed_ids(label, per_instance=None):
                 old = config.get("settings", {})
                 if any(old.get(key) != SETTINGS.get(key) for key in
                        ("model", "base_url", "temperature", "top_p", "max_output_tokens", "reasoning_effort",
-                        "sampling_mode", "thinking", "enable_thinking", "pricing", "api_retry", "task_selection")):
+                        "sampling_mode", "thinking", "enable_thinking", "thinking_budget", "stop_sequences",
+                        "output_protocol", "output_retry_attempts", "pricing", "api_retry", "task_selection")):
                     continue
                 if config.get("per_instance_cost_limit") != budget:
                     continue
