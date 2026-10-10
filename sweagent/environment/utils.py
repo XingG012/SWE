@@ -382,18 +382,13 @@ def terminate_docker_compose(docker_compose_path: Path) -> None:
         str(docker_compose_path),
         "down",
     ]
+    if os.environ.get("ENIGMA_CTF_PROJECT") and docker_compose_path.name == "compose.json":
+        terminate_cmd.append("--volumes")
     logger.debug("Terminating docker-compose with command: %s", shlex.join(terminate_cmd))
-    compose = subprocess.Popen(
-        terminate_cmd,
-        stdin=PIPE,
-        stdout=PIPE,
-        stderr=STDOUT,
-        text=True,
-        bufsize=1,  # line buffered
-    )
-    _, error = compose.communicate(timeout=DOCKER_COMPOSE_TERMINATION_DELAY)
-    if error:
-        logger.error(f"Unexpected compose termination error: {error}")
+    result = subprocess.run(terminate_cmd, env=credential_free_environment(),
+                            capture_output=True, text=True, timeout=DOCKER_COMPOSE_TERMINATION_DELAY)
+    if result.returncode:
+        raise RuntimeError(f"Docker Compose shutdown failed: {redact(result.stderr)[-2000:]}")
 
 
 def attach_network_interface_to_container(container_name: str) -> None:
@@ -401,7 +396,7 @@ def attach_network_interface_to_container(container_name: str) -> None:
         "docker",
         "network",
         "connect",
-        "ctfnet",
+        os.environ.get("ENIGMA_CTF_NETWORK", "ctfnet"),
         container_name,
     ]
     logger.debug("Attaching NIC to container with command: %s", shlex.join(cmd))
@@ -412,6 +407,9 @@ def attach_network_interface_to_container(container_name: str) -> None:
         # alive or silently ignore a failed connection.
         subprocess.run(cmd, env=credential_free_environment(), capture_output=True,
                        text=True, check=True, timeout=DOCKER_NETWORK_CONNECT_TIMEOUT)
+        if os.environ.get("ENIGMA_CTF_PROJECT"):
+            from sweagent.environment.ctf_isolation import verify_solver_dns
+            verify_solver_dns(container_name)
     except subprocess.TimeoutExpired:
         raise RuntimeError(
             f"Docker ctfnet connection timed out after {DOCKER_NETWORK_CONNECT_TIMEOUT:g} seconds"
@@ -422,6 +420,10 @@ def attach_network_interface_to_container(container_name: str) -> None:
 
 
 def get_docker_compose(docker_compose_path: Path) -> Path:
+    isolated = bool(os.environ.get("ENIGMA_CTF_PROJECT"))
+    if isolated:
+        from sweagent.environment.ctf_isolation import prepare_compose
+        docker_compose_path = prepare_compose(docker_compose_path)
     startup_cmd = [
         "docker",
         "compose",
@@ -431,19 +433,25 @@ def get_docker_compose(docker_compose_path: Path) -> Path:
         "-d",
         "--force-recreate",
     ]
+    if isolated:
+        startup_cmd += ["--wait", "--wait-timeout", "60"]
     logger.debug("Starting docker-compose with command: %s", shlex.join(startup_cmd))
-    compose = subprocess.Popen(
-        startup_cmd,
-        env=credential_free_environment(),
-        stdin=PIPE,
-        stdout=PIPE,
-        stderr=STDOUT,
-        text=True,
-        bufsize=1,  # line buffered
-    )
-    _, error = compose.communicate(timeout=DOCKER_COMPOSE_STARTUP_DELAY)
-    if error:
-        logger.error(f"Unexpected compose setup error: {error}")
+    try:
+        result = subprocess.run(startup_cmd, env=credential_free_environment(), capture_output=True,
+                                text=True, timeout=DOCKER_COMPOSE_STARTUP_DELAY)
+        if result.returncode:
+            raise RuntimeError(f"Docker Compose startup failed: {redact(result.stderr)[-2000:]}")
+        if isolated:
+            from sweagent.environment.ctf_isolation import verify_network_members
+            verify_network_members(os.environ["ENIGMA_CTF_NETWORK"], os.environ["ENIGMA_CTF_PROJECT"])
+    except BaseException:
+        # Main may not yet have registered the compose path for normal cleanup.
+        if isolated:
+            try:
+                terminate_docker_compose(docker_compose_path)
+            except Exception:
+                logger.warning("Partial Compose startup cleanup failed")
+        raise
     return docker_compose_path
 
 
@@ -474,6 +482,8 @@ def _get_non_persistent_container(
         "/bin/bash",
         "-l",
     ]
+    if os.environ.get("ENIGMA_CTF_PROJECT"):
+        startup_cmd[2:2] = ["--label", f"enigma.project={os.environ['ENIGMA_CTF_PROJECT']}"]
     logger.debug("Starting container with command: %s", shlex.join(startup_cmd))
     container = subprocess.Popen(
         startup_cmd,

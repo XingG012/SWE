@@ -44,17 +44,19 @@ class TaskLog:
             ("题目", ("name", "id", "category", "model")),
             ("结果", ("exit_status", "solved", "accounting_complete")),
             ("费用与预算（USD）", ("per_instance_cost_limit_usd", "cost_upper_usd", "cost_lower_usd",
-                              "known_cost_upper_usd", "known_cost_lower_usd")),
+                              "known_cost_upper_usd", "known_cost_lower_usd", "pricing_accounting")),
             ("步骤与模型调用", ("steps", "api_calls", "by_role")),
+            ("API 重试与隔离", ("successful_api_calls", "failed_api_calls", "api_failure_exhausted", "api_request_failed",
+                               "last_api_error", "ctf_project", "ctf_network", "exclusive_host_network")),
             ("Token 与缓存", ("prompt_tokens", "completion_tokens", "cache_hit_tokens", "cache_hit_ratio")),
             ("耗时（秒）", ("wall_seconds", "initialization_seconds", "api_latency_seconds",
                          "action_and_summary_seconds")),
             ("时间（Asia/Shanghai）", ("started_at", "finished_at")),
             ("工具调用", ("tool_counts",)),
             ("诊断与原始数据", ("error_type", "error_message", "cleanup_errors", "trajectory_dir",
-                           "usage_ledger", "step_metrics")),
+                           "usage_ledger", "step_metrics", "process_log_missing")),
         )
-        lines = ["=== 主要指标（null 表示尚未统计或未知；费用为价格上下界估算） ==="]
+        lines = ["=== 主要指标（null 表示尚未统计或未知；费用按配置价格估算） ==="]
         for label, keys in groups:
             lines.append(label + ": " + json.dumps({k: values.get(k) for k in keys}, ensure_ascii=False))
         lines.append("=== 解题过程 ===")
@@ -67,13 +69,24 @@ class TaskLog:
         Atomic replacement keeps a readable log even if finalization is interrupted.
         """
         metrics = {**metrics, "finished_at": datetime.now(ZoneInfo("Asia/Shanghai")).isoformat(timespec="seconds")}
+        self.path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        try:
+            source = self.path.open("rb")
+        except FileNotFoundError:
+            source = None
+            metrics["process_log_missing"] = True
         descriptor, temporary = tempfile.mkstemp(prefix=".task-log-", dir=self.path.parent)
         try:
-            with os.fdopen(descriptor, "wb") as target, self.path.open("rb") as source:
+            with os.fdopen(descriptor, "wb") as target:
                 target.write(self._header(metrics).encode("utf-8"))
-                source.seek(self.process_offset)
-                shutil.copyfileobj(source, target)
+                if source is not None:
+                    source.seek(self.process_offset)
+                    shutil.copyfileobj(source, target)
+                else:
+                    target.write("原始过程日志不存在；本文件仅恢复最终指标。\n".encode("utf-8"))
             os.replace(temporary, self.path)
         finally:
+            if source is not None:
+                source.close()
             if os.path.exists(temporary):
                 os.unlink(temporary)

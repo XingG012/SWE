@@ -1,3 +1,243 @@
+# 当前测试：GPT-5.4 / TeamoRouter
+
+主智能体和摘要模型均为 **`gpt-5.4`**，端点 **`https://api.teamorouter.com/v1`**，
+凭据读取 `TEAMOROUTER_API_KEY` 或权限 0600 的 `.secrets/teamorouter_api_key`。
+每题预算 **1.0 USD**，主/摘要/格式纠错共用；默认三题试跑整批预算 3.0 USD，
+可读日志写入 **`logs/gpt-5.4/`**。
+
+当前只测试 DeepSeek 正式成功日志对应的 **82 道唯一题目**，名单固定于
+`gpt54_deepseek82_tasks.json`，每题附带成功日志和结果文件证据。
+GPT 已成功的 Collision Course、DockREleakage、Gibberish Check 在名单内，
+沿用成功结果并跳过；maze、sfc 已在 $0.8 下达到预算上限失败，也跳过。
+当前实际待测 **77 题**；GPT 另已解出的 eMbrEy0 LEaK
+不在这 82 题中，保留结果且不运行。三路分配为 26、26、25 题。
+
+新实验编号 `gpt54-deepseek82-20261010`，固定名单明确沿用已成功的 3 题，
+并排除之前 $0.8 下已失败的 2 题。手动中断的 The Big Bang 仍待运行。
+新实验后续同命令续跑时跳过
+已完成题，重试中断/API/基础设施故障题。没有删除旧日志或结果。
+名单固定为用户指定的 82 题，不额外纳入早期试跑中成功但没有对应正式成功日志的题。
+
+沿用当前消息、示例与命令格式，通过 OpenAI 兼容 Chat Completions 调用；发送
+`max_completion_tokens=4096` 和 `reasoning_effort=none`（官方默认），
+保留温度 0、top_p 0.95。需要其他推理档位时适配器自动省略不兼容的采样参数。
+
+费用按 [GPT-5.4 官方参考价格](https://developers.openai.com/api/docs/models/gpt-5.4)
+估算：每百万 tokens 输入 2.50 USD、缓存输入 0.25 USD、输出 15.00 USD；
+超过 272000 输入 tokens 后，该会话按输入 2 倍、输出 1.5 倍估算。
+中转站实际价格尚未取得，**预算停止阈值与费用均为参考价格估算，不代表中转站账单**。
+ledger 标记 `pricing_accounting=official_rate_reference_estimate`，沿用响应后预算检查。
+
+2026-10-09 验证：最小真实请求成功，返回模型 `gpt-5.4-2026-03-05`，输入 7 tokens、
+输出 10 tokens，`finish_reason=stop`；适配器实际发送的 `reasoning_effort=none` +
+`max_completion_tokens=4096` + 温度/top_p 请求格式被接受。52 项离线测试通过。
+此前 x1api 端点对 `gpt-5.4` 返回 HTTP 404（该分组不支持此模型），已切换至 TeamoRouter。
+诊断汇总：`generated/gpt54-connectivity.json`。
+
+数据、六类官方提示词、示例、工具、评分与固定 Docker 镜像沿用现有实现。
+续跑按实验编号、选题名单、模型、端点、采样口径和预算筛选，旧模型结果不会导致 GPT-5.4 跳题。
+
+```bash
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --settings enigma_reproduction/gpt54_settings.json --preflight
+# 只预览名单、已成功/已失败跳过、剩余数量和预算；不调用模型、不启动 Docker
+bash enigma_reproduction/run_gpt54.sh --dry-run
+# 用户手动启动：仅 82 题范围内的待测题，默认三路并行，每题 $1.0，整批 $82
+bash enigma_reproduction/run_gpt54.sh
+```
+
+2026-10-10 本次配置验证：选题预览 82/跳过 5（成功 3、旧预算失败 2）/剩余 77，单题 $1.0、整批 $82、
+三路并行；Docker/凭据/固定镜像/选题 SHA256/数据集一致性预检查通过，
+95 项相关测试通过。本次仅验证配置，0 次模型调用，没有启动解题。
+预览证据：`generated/selection-preview.json`；配置验证：
+`generated/gpt54-deepseek82-verification.json`。
+
+## 2026-10-10：并行隔离、API 恢复与预算规则
+
+新版运行器为每次题目尝试创建唯一 Compose 项目和 Docker 网络。原题的服务域名、
+容器内部端口、附件和评分保持原样；生成私有运行配置，取消宿主机端口发布和固定容器名，
+并为题目内部网络与命名卷使用独立名称。Compose 启动必须成功并通过运行/健康状态等待，
+agent 接入后核对题目域名只解析到本次项目的服务。结束时只清理本次资源。
+这些措施适用于当前支持的各模型。Docker 的外部网络名称不会自动受 project 隔离，
+所以不能仅加 `-p`；见 [Docker 网络文档](https://docs.docker.com/reference/compose-file/networks/)。
+
+`Triathlon or Sprint` 包含宿主机网络的转发服务，保持原题实现并使用独占锁；普通题共享锁
+并行运行，该特殊题开始时等待其他题退出，结束后继续并行。此锁覆盖使用新版运行器启动的
+各模型批次。旧程序没有使用该锁，不应与新版宿主机网络题同时运行。
+
+模型接口默认最多尝试 4 次（首发 + 最多 3 次重试），仅重试连接异常及 HTTP
+408/409/429/5xx，使用指数退避和随机抖动。400/401/403/404 等错误直接报告。
+SDK 内部重试继续关闭，避免无法统计的隐式重试；逐次 ledger 保存异常类型、底层异常类别、
+HTTP 状态、可用的 request ID、尝试次数和已知/未知费用。错误分类参考
+[OpenAI Python SDK](https://github.com/openai/openai-python#retries)。
+2026-10-10 针对 Callsite 的 HTTP 400 补充了错误诊断：只提取错误码、参数名、
+类型和最多 500 字符的脱敏错误说明，不记录完整响应正文或请求头；同时写入
+usage ledger、可读日志与结果中的 `last_api_error`。400 仍不自动重复请求。
+补丁在下次启动生效；旧记录中没有保存的服务端说明无法追溯恢复。
+连接尚未建立且请求未发送的失败记 0 费用；已发送但响应中断的请求保留未知费用，
+恢复成功后也不会把未知费用抹掉。已收到 usage 的响应按官方配置正常计费。
+重试耗尽的 API 故障不会被续跑永久跳过；普通解题失败仍保持跳过。
+
+`run_config.json` 现在保存隔离/重试协议版本，续跑还检查价格和重试配置。
+旧共享网络批次不作为新版已完成题，原日志保持保留。自动补跑基础设施故障应与有效的
+单次解题尝试区分，历史费用仍保存在各次尝试记录中，不把重试成本删除。
+
+预算按用户要求继续使用官方参考价格，主模型、摘要和格式纠错共同计费。
+**下一批单题预算 = 相同模型和配置下、计费完整的成功题平均费用 × 2**。
+失败题费用照常保留在总费用中，成功均价只统计成功题；一批开始后不自动改变阈值。
+本次按用户要求固定每题 1.0 USD；成功均价的两倍仍作为后续建议，不自动覆盖本次预算。
+摘要花费也包含在成功均价内。
+
+2026-10-10 的完整集旧实验编号为 `gpt54-fresh-20261010`；当前已换为
+`gpt54-deepseek82-20261010`，沿用的 3 道已成功题在固定选题文件中明确记录。
+其余旧结果不参与这次进度；同编号、同预算中已完成题仍可用于断点续跑。
+以后彻底重测时使用新的 `--experiment` 编号，不必删除日志。
+
+手动 Ctrl+C 或向父进程发送 SIGTERM 时，父进程通知各 worker 保存中断状态并清理资源。
+每题结果原子写入 `results.json`，随后重跑同一命令即可跳过已完成题、重试中断题及
+API/基础设施故障题；恢复到题目级别，中断题从头解，不恢复模型对话或容器执行现场。
+单题报错记录后继续下一题，预算用尽则停止。不要在续跑时加 `--from-scratch`。
+SIGKILL、断电或磁盘故障无法承诺正常清理；缺少完成记录的题仍会重新尝试。
+同一实验的顶层启动器有互斥锁，避免重复启动造成双重解题。
+结果先保存，再更新可读日志；日志收尾错误不会丢失断点或阻止下一题，
+过程日志缺失时恢复最终指标并明确标记缺失。
+正常停止最多等待 45 秒，随后强制停止未退出的 worker。
+整批 `--total` 是每次启动的预算，历史费用保留，不会因重启被删除。
+
+```bash
+# 当前 GPT：三路并行；整批预算需显式指定
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py \
+  --settings enigma_reproduction/gpt54_settings.json \
+  --run --num-workers 3 --per-instance 1.0 --total 82
+
+# 等价快捷入口：首次运行仅选 DeepSeek 成功集并排除 GPT 已成功题；后续运行自动续跑
+bash enigma_reproduction/run_gpt54.sh
+
+# 将来再次彻底重测：换实验编号；正常续跑沿用该编号
+bash enigma_reproduction/run_gpt54.sh --experiment gpt54-another-experiment
+
+# 有成功结果后，查看均价和下一批预算建议，不会调用模型或启动 Docker
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py \
+  --settings enigma_reproduction/gpt54_settings.json --budget-report
+
+# 后续换模型，传对应的配置文件，不必覆盖 settings.json
+# --settings enigma_reproduction/deepseek_settings.json
+# --settings enigma_reproduction/gemini_settings.json
+# --settings enigma_reproduction/claude_settings.json
+```
+
+真实 Docker 隔离验证同时启动 `sfc` 和 `Gibberish Check`：两题都通过
+`rev.chal.csaw.io:8000` 访问，各自分别返回 `WELCOME` / `Find the Key!`；
+清理 sfc 后另一题仍可访问，全部测试资源已清理，0 次模型调用。
+证据：`generated/isolation-smoke-20261010T005232097426Z/report.json`。
+可用 `.venv-enigma/bin/python enigma_reproduction/check_isolation.py` 重复这项无模型验证。
+2026-10-10 相关离线测试 77 项通过，包含真实子进程中断后的 worker 退出、
+中断题落盘、单题异常后继续下一题、旧实验排除、重复启动互斥和原子写入失败恢复。
+
+下面是 Claude Sonnet 5、Gemini 和 DeepSeek 的历史配置与验证记录。旧模型使用各自
+保存的 `claude_settings.json` / `gemini_settings.json` / `deepseek_settings.json`；
+历史日志和原始结果保留。
+
+# 历史测试：Claude Sonnet 5 / x1api
+
+主智能体和摘要模型均为 `claude-sonnet-5`，端点 `https://x1api.top/v1`，
+凭据读取 `X1API_API_KEY` 或权限 0600 的 `.secrets/x1api_api_key`，使用用户
+已切换分组的原密钥。每题预算 1.4 USD；默认三题试跑整批 4.2 USD；
+可读日志 `logs/claude-sonnet-5/`。
+
+沿用 OpenAI 兼容 Chat Completions，输出限制 4096 tokens。按
+[Sonnet 5 参数说明](https://platform.claude.com/docs/en/models/sonnet-5/overview)
+请求省略自定义温度和 top_p，使用服务端默认采样及自适应思考，记录
+`sampling_mode=provider_default`、`sampling_parameters_sent=false`。
+
+费用按 [Claude 官方参考价格](https://platform.claude.com/docs/en/about-claude/pricing)
+估算：输入 2 USD、缓存读取 0.20 USD、输出 10 USD/M tokens；报告缓存写入时按
+5 分钟 2.50 / 1 小时 4 USD 记录范围。中转站实际价格尚未取得，预算与费用为参考估算。
+
+2026-10-09 验证：52 项离线测试通过，最小真实请求成功返回 `OK`（`claude-sonnet-5`，
+输入 28 tokens、输出 4 tokens，约 17.68 秒）；用户授权后完成一次 ShreeRamQuest
+首轮输入对照（返回 `claude-sonnet-5`，未拒答，首个动作 `curl -i http://web.chal.csaw.io:80`，
+仅记录未执行）。诊断：`generated/sonnet5-connectivity.json`、
+`generated/sonnet5-ctf-check-20261009T141415151176Z/report.json`。
+
+# 历史测试：GPT-5.4 / x1api（早期端点，现已切换 TeamoRouter）
+
+主智能体和摘要模型均为 `gpt-5.4`，每题预算 **0.8 USD**（主/摘要共用），
+默认三题试跑整批预算 2.4 USD，可读日志写入 **`logs/gpt-5.4/`**。
+早期端点 `https://x1api.top/v1`，凭据读取 `X1API_API_KEY` 或权限 0600 的
+`.secrets/x1api_api_key`。现已按用户要求切换至 TeamoRouter（见顶部当前配置）。
+
+2026-10-09 22:02（Asia/Shanghai）分组切换后复核：模型列表仍无 `gpt-5.4`，
+实际最小生成请求仍返回 HTTP 404；此前 43 项离线测试通过。服务商错误：
+`Model "gpt-5.4" is not supported by any configured account in this group`。
+当前密钥所属分组缺少该模型的支持，尚未验证 GPT-5.4 的生成或 CTF 响应。
+诊断位于 `generated/gpt54-verification-*/report.json` 与 `logs/gpt-5.4/API验证_*.log`。
+
+请求沿用 EnIGMA 消息和命令格式，使用 Chat Completions；发送
+`max_completion_tokens=4096` 和 `reasoning_effort=none`（官方默认），
+保留温度 0、top_p 0.95。需要其他推理档位时适配器自动省略不兼容的采样参数。
+模型、端点、推理档位和每题预算不同的历史结果不会被当前续跑跳过。
+
+费用暂按 [GPT-5.4 官方参考价格](https://developers.openai.com/api/docs/models/gpt-5.4)
+估算：每百万 tokens 输入 2.50 USD、缓存输入 0.25 USD、输出 15.00 USD；
+超过 272000 输入 tokens 后，该会话按输入 2 倍、输出 1.5 倍估算。
+中转站实际价格尚未获取，**预算停止阈值与费用均为参考价格估算，不代表中转站账单**。
+ledger 标记 `pricing_accounting=official_rate_reference_estimate`，沿用响应后预算检查。
+
+数据、类别配置、示例、工具、评分与固定 Docker 镜像沿用现有 EnIGMA。
+
+```bash
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --pilot
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.8 --total 160
+```
+
+以下是 Gemini 和 DeepSeek 的历史配置与验证记录。旧适配器使用各自保存的
+`gemini_settings.json` / `deepseek_settings.json`；历史日志与原始结果保留。
+
+# 历史测试：Gemini 3.6 Flash / TeamoRouter
+
+主智能体和摘要模型均为 `gemini-3.6-flash`，使用
+`https://api.teamorouter.com/v1` 的 OpenAI 兼容接口。用户给出的 Google GenAI
+示例可用于原生 Gemini 协议；这里沿用 SWE-agent 现有消息格式和已安装的 OpenAI SDK，
+不向 Gemini 发送 DeepSeek 专用的 `thinking` 字段。
+接口参考：[TeamoRouter 接入文档](https://api.teamorouter.com/docs/api-integration)。
+
+- 每题预算：**0.8 USD**，主智能体、摘要与格式纠错共用。
+- 默认三题试跑整批预算：**2.4 USD**。
+- 可读日志：**`logs/gemini-3.6-flash/题目名_时间戳.log`**。
+- 凭据：环境变量 `TEAMOROUTER_API_KEY`，或权限 `0600` 的
+  `.secrets/teamorouter_api_key`；入口自动读取该文件。密钥不写入配置、轨迹或 Git。
+- 断点续跑按模型、端点、采样配置和每题预算筛选历史批次，Gemini 不会跳过 DeepSeek
+  已做过的题目。生成数据仍在 `enigma_reproduction/generated/run-*` 中，
+  `run_config.json` 和每题结果记录模型与计费口径。
+- 数据、六类提示词、示例、工具、评分及 Docker 镜像沿用当前 EnIGMA 实现。
+
+```bash
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --preflight
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --pilot
+# 全测试集 200 题；显式填写本次整批预算
+.venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.8 --total 160
+# 需要并行时追加 --num-workers 4
+```
+
+配置价格参考 [TeamoRouter 公示价格](https://api.teamorouter.com/zh)：每百万 tokens
+输入 0.30 USD、缓存输入 0.03 USD、输出 1.50 USD。中转站折扣会变化，配置是核对时的
+价格快照，**费用与预算停止阈值按该快照估算，并非服务商精确账单或保证上下界**。
+为兼容现有分析，保留 `cost_upper_usd` / `cost_lower_usd` 字段名；Gemini 的两组价格
+相同，ledger、结果和汇总通过 `pricing_accounting=router_rate_snapshot_estimate` 标明口径。
+主模型和摘要均使用响应中的完整 `completion_tokens`，不重复加推理 tokens。
+预算沿用响应后检查，会超出阈值至多一个在途请求的费用；无有效 usage 时记为未知，
+结束该题。沿用当前批次行为：单题接口错误记为已完成失败，继续后面的题目。
+
+2026-10-09 21:42（Asia/Shanghai）充值后验证：最小真实请求成功返回 `OK`，
+返回模型为 `gemini-3.6-flash`，输入 268 tokens、输出 40 tokens，耗时约 9.20 秒，
+配置价格估算费用 0.0001404 USD，usage 计费数据有效。Docker/官方镜像/配置预检通过。
+此前 37 项离线测试通过；尚未启动正式题目。先前余额不足记录保留，当前验证汇总位于
+`generated/gemini-connectivity.json`，逐次诊断位于 `generated/gemini-verification-*/`，
+可读验证日志位于 `logs/gemini-3.6-flash/`。
+
+旧 DeepSeek 模型适配仍可读取 `deepseek_settings.json`，历史日志和结果保留。
+本节以下是此前 DeepSeek 实验的历史说明，其默认模型、预算与命令不适用于当前 Gemini 配置。
+
 # EnIGMA / DeepSeek Flash 复现准备
 
 当前项目根目录是官方 SWE-agent v0.7，基线 commit 为

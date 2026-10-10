@@ -1001,6 +1001,10 @@ def get_model(args: ModelArguments, commands: list[Command] | None = None):
         return HumanThoughtModel(args, commands)
     if args.model_name == "replay":
         return ReplayModel(args, commands)
+    elif args.model_name == "gpt-5.4":
+        from sweagent.agent.gpt54 import GPT54Model
+
+        return GPT54Model(args, commands)
     elif (
         args.model_name.startswith("gpt")
         or args.model_name.startswith("ft:gpt")
@@ -1008,12 +1012,20 @@ def get_model(args: ModelArguments, commands: list[Command] | None = None):
         or args.model_name in OpenAIModel.SHORTCUTS
     ):
         return OpenAIModel(args, commands)
+    elif args.model_name == "claude-sonnet-5":
+        from sweagent.agent.claude_sonnet5 import ClaudeSonnet5Model
+
+        return ClaudeSonnet5Model(args, commands)
     elif args.model_name.startswith("claude"):
         return AnthropicModel(args, commands)
     elif args.model_name.startswith("bedrock"):
         return BedrockModel(args, commands)
     elif args.model_name.startswith("ollama"):
         return OllamaModel(args, commands)
+    elif args.model_name == "gemini-3.6-flash":
+        from sweagent.agent.gemini_flash import GeminiFlashModel
+
+        return GeminiFlashModel(args, commands)
     elif args.model_name == "deepseek-flash":
         from sweagent.agent.deepseek_flash import DeepSeekFlashModel
 

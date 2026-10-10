@@ -255,9 +255,13 @@ def test_formal_and_pilot_share_single_log_layout_and_budget(tmp_path, monkeypat
     monkeypatch.setattr(runner, "ROOT", tmp_path)
     monkeypatch.setattr(runner, "GENERATED", generated)
     monkeypatch.setattr(runner, "preflight", lambda image: {"ready": True, "resolved_image": "sha256:test"})
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-log-credential")
+    monkeypatch.setenv(runner.credential_env(), "synthetic-log-credential")
     monkeypatch.setenv("ENIGMA_USAGE_LEDGER", "unused-test-ledger")
-    monkeypatch.setattr(docker, "from_env", Mock(return_value=Mock()))
+    client = Mock()
+    client.containers.list.return_value = []
+    client.networks.list.return_value = []
+    monkeypatch.setattr(docker, "from_env", Mock(return_value=client))
+    (tmp_path / "challenge.json").write_text("{}")
     # Real official category config/arguments are loaded; only Docker and Main are replaced.
     records = [{"id": "nyu-test-id", "name": "Example Challenge", "category": "crypto",
                 "path": str(tmp_path), "missing_attachments": [],
@@ -291,14 +295,18 @@ def test_formal_and_pilot_share_single_log_layout_and_budget(tmp_path, monkeypat
             runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-id"], label=label)
     else:
         assert runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-id"], label=label) == 0
-    logs = list((tmp_path / "logs/deepseek-flash").glob("*.log"))
+    logs = list((tmp_path / "logs" / runner.SETTINGS["model"]).glob("*.log"))
     assert len(logs) == 1 and logs[0].name.startswith("Example_Challenge_")
     content = logs[0].read_text()
     header, process = content.split("=== 解题过程 ===\n", 1)
-    assert '"cost_upper_usd": 0.02' in header
     if interrupted:
         assert '"exit_status": "interrupted"' in header
+        assert '"known_cost_upper_usd": 0.02' in header
+        result = json.loads(next(generated.glob(f"{label}-*/results.json")).read_text())[0]
+        assert result["exit_status"] == "interrupted" and result["known_cost_upper_usd"] == .02
+        assert runner.prior_completed_ids(label, .4) == set()
         return
+    assert '"cost_upper_usd": 0.02' in header
     assert '"solved": true' in header
     assert "Accepted" in process and "submit flag" in process and "STEP 1" in process
     assert used_budgets == [.4]
@@ -374,7 +382,12 @@ def test_resume_skips_completed_but_retries_infra_and_interrupted(tmp_path, monk
         {"id": "pilot-only", "accounting_complete": True, "exit_status": "submitted"},
     ]))
     monkeypatch.setattr(runner, "GENERATED", generated)
-    assert runner.prior_completed_ids("run") == {"done-solved", "done-failed"}
+    monkeypatch.setitem(runner.SETTINGS, "model", "deepseek-flash")
+    for directory in generated.iterdir():
+        (directory / "run_config.json").write_text(json.dumps({"settings": runner.SETTINGS,
+            "runtime_protocol": runner.RUNTIME_PROTOCOL,
+            "per_instance_cost_limit": runner.SETTINGS["pilot_per_instance_cost_limit" if directory.name.startswith("pilot-") else "per_instance_cost_limit"]}))
+    assert runner.prior_completed_ids("run") == {"done-solved", "done-failed", "retry-unknown"}
     assert runner.prior_completed_ids("pilot") == {"pilot-only"}
 
 
@@ -387,11 +400,17 @@ def test_split_chunks_is_contiguous_and_capped():
     assert runner.split_chunks(ids[:3], 4) == [["t0"], ["t1"], ["t2"]]
 
 
-def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch):
+@pytest.mark.parametrize("first_raises", [False, True])
+@pytest.mark.parametrize("log_finalize_fails", [False, True])
+def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch, first_raises, log_finalize_fails):
     import os
     import docker
     import run
     import enigma_reproduction.run_nyu as runner
+
+    if log_finalize_fails:
+        from enigma_reproduction.task_log import TaskLog
+        monkeypatch.setattr(TaskLog, "finalize", Mock(side_effect=FileNotFoundError("synthetic missing readable log")))
 
     generated = tmp_path / "generated"
     generated.mkdir()
@@ -399,9 +418,13 @@ def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch):
     monkeypatch.setattr(runner, "ROOT", tmp_path)
     monkeypatch.setattr(runner, "GENERATED", generated)
     monkeypatch.setattr(runner, "preflight", lambda image: {"ready": True, "resolved_image": "sha256:test"})
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "synthetic-log-credential")
+    monkeypatch.setenv(runner.credential_env(), "synthetic-log-credential")
     monkeypatch.setenv("ENIGMA_USAGE_LEDGER", "unused-test-ledger")
-    monkeypatch.setattr(docker, "from_env", Mock(return_value=Mock()))
+    client = Mock()
+    client.containers.list.return_value = []
+    client.networks.list.return_value = []
+    monkeypatch.setattr(docker, "from_env", Mock(return_value=client))
+    (tmp_path / "challenge.json").write_text("{}")
     config = str(Path("config/ctf/ctf_crypto.yaml").resolve())
     records = [{"id": "nyu-test-a", "name": "First", "category": "crypto",
                 "path": str(tmp_path), "missing_attachments": [], "config": config},
@@ -418,6 +441,8 @@ def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch):
             self.traj_dir = tmp_path / "trajectory"
 
         def run(self, index):
+            if first_raises and self.agent.info["exit_status"] == "exit_error":
+                raise RuntimeError("Synthetic per-task Docker startup failure")
             Path(os.environ["ENIGMA_USAGE_LEDGER"]).write_text(json.dumps({"role": "primary",
                 "accounting_complete": True, "prompt_tokens": 100, "completion_tokens": 5,
                 "cache_hit_tokens": 20, "cost_upper_usd": .02, "cost_lower_usd": .01}) + "\n")
@@ -426,7 +451,9 @@ def test_exit_error_does_not_halt_the_batch(tmp_path, monkeypatch):
     assert runner.pilot(records, "unused-test-image", .4, .8, ["nyu-test-a", "nyu-test-b"], label="run") == 0
     rows = json.loads(next(generated.glob("run-*/results.json")).read_text())
     assert [r["id"] for r in rows] == ["nyu-test-a", "nyu-test-b"]
-    assert [r["exit_status"] for r in rows] == ["exit_error", "submitted"]
+    assert [r["exit_status"] for r in rows] == ["infrastructure_error" if first_raises else "exit_error", "submitted"]
+    if log_finalize_fails:
+        assert all("log_finalize_error" in row for row in rows)
 
 
 def test_network_connection_has_own_timeout_and_no_credential_environment(monkeypatch):
