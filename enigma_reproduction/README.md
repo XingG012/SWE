@@ -428,11 +428,12 @@ sudo service docker start
 
 手动中断（Ctrl+C）后重新运行同一命令，会自动跳过之前批次已完成的题目，从
 中断的那道题继续。判断依据是历史 `run-*/results.json`（试跑对应 `pilot-*/results.json`）
-里 `accounting_complete` 为真且 `exit_status` 不是 `infrastructure_error` 的条目：
+里同模型、同配置、同预算、同实验 ID 和同隔离协议的条目：
 
 - 已完成的有效尝试（无论成功或失败）会被跳过，保持 pass@1 口径、不重复计费；
-- 被中断的那道题没有写入 `results.json`，因此会重新尝试；
-- 基础设施故障（`infrastructure_error`）与计费不完整（`accounting_complete` 为假）也会重试。
+- 被中断的题保存为 `interrupted`，重新运行时会从这道题重新开始解题（不恢复题内会话）；
+- 基础设施故障（`infrastructure_error`）、API 重试耗尽、API 失败或计费不完整的 `exit_error` 也会重试；
+- 某题报错后当前批次直接继续下一题，历史尝试和日志始终保留。
 
 ```bash
 .venv-enigma/bin/python enigma_reproduction/run_nyu.py --run --per-instance 0.1 --total 20
@@ -455,8 +456,9 @@ sudo service docker start
 
 每个 worker 的完整输出另存于 `enigma_reproduction/generated/parallel-*/worker-*.log`，
 父进程在标准输出打印每个 worker 的分块大小、退出码和汇总结果。并行度受 Docker
-容器资源与 API 速率限制约束；server 类题并发时宿主端口可能冲突，如遇冲突可减少
-worker 数或对这类题改回串行。断点续跑与并行兼容：重跑会自动跳过所有已完成题目后
+容器资源与 API 速率限制约束。每题使用唯一 Compose 项目和私有 Docker 网络，保留
+题目的内部端口和 DNS 别名，移除宿主端口发布及固定容器名；清理仅操作本题资源。
+使用 host 网络的特殊题会自动取得排他锁，其他题可并发。断点续跑与并行兼容：重跑会自动跳过所有已完成题目后
 再重新分块。
 
 正式运行和试跑的可读日志统一保存在 Git 忽略的 **`logs/deepseek-flash/`**，
@@ -482,3 +484,48 @@ finish reason。每题记录初始化时间、总耗时、步数、工具调用�
 若在当前工具执行沙箱内访问 Docker 被权限拒绝，需在正常 Linux 终端运行，
 或由已授权的执行工具使用可访问 Docker 的环境。不是数据路径不存在，也不是凭据错误。
 任何命令都不上传整个项目、Word、旧日志或私密配置；模型只接收官方方法构造的题目上下文和观察。
+
+### Qwen3-Max：DeepSeek 成功的 82 题
+
+使用 `qwen3_max_settings.json` 和固定 SHA256 的 `qwen3_max_deepseek82_tasks.json`。
+该清单与 GPT 实验的 DeepSeek 成功 82 题完全一致，保留每道题的 DeepSeek 成功证据，
+但不继承 GPT 的成功或失败结果。传入 `--ids` 也只能从这 82 题中选择。
+凭据读取 `DASHSCOPE_API_KEY` 或权限 `0600` 的 `.secrets/dashscope_api_key`。
+
+OpenAI 兼容地址为
+`https://llm-c83fttgtl5nbioqs.cn-beijing.maas.aliyuncs.com/compatible-mode/v1`。
+DashScope 原生地址记录在设置中，当前适配器使用 OpenAI 兼容接口。
+请求启用 `enable_thinking=true` 和流式输出，通过 `stream_options.include_usage=true`
+读取最终 usage；仅最终回复进入动作解析，思考 token 已包含在 completion token 费用中。
+主模型与摘要模型共用每题 0.1 USD 预算。费用按官方北京地域的美元列表价逐请求阶梯估算，
+保守地不扣除缓存折扣；专属端点的实际合同账单可能不同。
+参考：[官方价格](https://www.alibabacloud.com/help/en/model-studio/model-pricing)、
+[流式 usage](https://help.aliyun.com/en/model-studio/stream)。
+
+默认每题预算 0.1 USD、本次启动总预算 8.2 USD、3 个 worker。预算按返回的真实 usage
+检查，最后一次已发出的调用可能使费用超过阈值；这沿用现有 GPT/DeepSeek 的停止语义。
+API 超时或人工中断时没有返回的用量标记为未知，不假定费用为零。
+
+```bash
+# 默认 3 路并行；Ctrl+C 停止后，再执行同一命令自动续跑。
+bash enigma_reproduction/run_qwen3_max.sh
+
+# 切换到 2 或 4 路并行，同一实验仍按历史完成记录续跑。
+bash enigma_reproduction/run_qwen3_max.sh --num-workers 2
+bash enigma_reproduction/run_qwen3_max.sh --num-workers 4
+
+# 只预览题目选择，或进行 4 个极短请求的接口检查。
+bash enigma_reproduction/run_qwen3_max.sh --dry-run
+.venv-enigma/bin/python enigma_reproduction/qwen3_max_connectivity_check.py --num-workers 4
+```
+
+可读日志统一写入 `logs/qwen3-max/题目名_上海时间.log`；不同 worker 使用独立进程、
+结果目录、费用账本、日志和解题容器。父进程批次输出位于
+`enigma_reproduction/generated/parallel-*/worker-*.log`。
+默认实验 ID 为 `qwen3-max-deepseek82-20261010`，重新运行时保持该 ID；
+改用 `--experiment 新名称` 可建立独立实验。
+同一实验的第二个启动器会被锁阻止，以免重复解题；需要 2–4 路时使用 `--num-workers`。
+如只想跳过问题题目，可运行 `bash enigma_reproduction/run_qwen3_max.sh --skip-ids 题目ID`，
+或用 `--ids` 指定清单中的部分题目。`--skip-ids` 仅作用于本次启动，后续续跑若仍想排除
+这些题，应保留同一参数；
+基础设施/API 故障默认保留待重试状态，不会被记为有效的 pass@1 失败。

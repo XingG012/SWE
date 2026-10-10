@@ -267,7 +267,8 @@ def test_atomic_checkpoint_preserves_last_complete_results_on_write_failure(tmp_
     assert json.loads(path.read_text()) == [{'id': 'completed'}]
 
 
-def test_parallel_interrupt_stops_real_workers_and_saves_checkpoint(tmp_path, monkeypatch):
+@pytest.mark.parametrize('workers', [2, 4])
+def test_parallel_interrupt_stops_real_workers_and_saves_checkpoint(tmp_path, monkeypatch, workers):
     import time
     import textwrap
     generated = tmp_path / 'generated'
@@ -309,7 +310,7 @@ def test_parallel_interrupt_stops_real_workers_and_saves_checkpoint(tmp_path, mo
         if interrupt_sent:
             return original_sleep(seconds)
         deadline = time.monotonic() + 10
-        while len(list(generated.glob('run-offline-*/ready'))) < 2:
+        while len(list(generated.glob('run-offline-*/ready'))) < workers:
             assert time.monotonic() < deadline, 'offline workers did not become ready'
             original_sleep(.01)
         foreign = generated / 'run-unrelated'
@@ -320,16 +321,17 @@ def test_parallel_interrupt_stops_real_workers_and_saves_checkpoint(tmp_path, mo
         raise KeyboardInterrupt
 
     monkeypatch.setattr(runner.time, 'sleep', interrupt_after_workers_ready)
-    assert runner.run_in_parallel([], 'unused', .8, 3.2, ['a', 'b', 'c', 'd'], 2, False) == 130
+    identifiers = list('abcdefgh')[:workers * 2]
+    assert runner.run_in_parallel([], 'unused', .8, .8 * len(identifiers), identifiers, workers, False) == 130
     summary = json.loads(next(generated.glob('parallel-*/summary.json')).read_text())
     batch = json.loads(next(generated.glob('parallel-*/batch.json')).read_text())
-    assert summary['interrupted'] and summary['attempted'] == 4 and summary['solved'] == 2
-    assert summary['known_cost_upper_usd'] == pytest.approx(.2)
-    assert len(summary['result_directories']) == 2
+    assert summary['interrupted'] and summary['attempted'] == workers * 2 and summary['solved'] == workers
+    assert summary['known_cost_upper_usd'] == pytest.approx(.1 * workers)
+    assert len(summary['result_directories']) == workers
     assert all(code == 130 for code in summary['exit_codes'].values())
     assert all(not Path('/proc', str(worker['pid'])).exists() for worker in batch['workers'])
     rows = [row for path in generated.glob('run-offline-*/results.json') for row in json.loads(path.read_text())]
-    assert {row['id'] for row in rows if row['exit_status'] == 'interrupted'} == {'b', 'd'}
+    assert {row['id'] for row in rows if row['exit_status'] == 'interrupted'} == set(identifiers[1::2])
 
 
 def test_missing_readable_log_is_recovered_without_losing_task_result(tmp_path):

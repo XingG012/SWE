@@ -1026,6 +1026,10 @@ def get_model(args: ModelArguments, commands: list[Command] | None = None):
         from sweagent.agent.gemini_flash import GeminiFlashModel
 
         return GeminiFlashModel(args, commands)
+    elif args.model_name == "qwen3-max":
+        from sweagent.agent.qwen3_max import Qwen3MaxModel
+
+        return Qwen3MaxModel(args, commands)
     elif args.model_name == "deepseek-flash":
         from sweagent.agent.deepseek_flash import DeepSeekFlashModel
 

@@ -140,6 +140,7 @@ def repository_status():
                                  ":(exclude)sweagent/agent/deepseek_flash.py",
                                  ":(exclude)sweagent/agent/gemini_flash.py",
                                  ":(exclude)sweagent/agent/gpt54.py",
+                                 ":(exclude)sweagent/agent/qwen3_max.py",
                                  ":(exclude)sweagent/agent/claude_sonnet5.py",
                                  ":(exclude)sweagent/environment/ctf_isolation.py",
                                  ":(exclude)sweagent/utils/secrets.py"], cwd=ROOT, capture_output=True)
@@ -260,7 +261,7 @@ def prior_completed_ids(label, per_instance=None):
                 old = config.get("settings", {})
                 if any(old.get(key) != SETTINGS.get(key) for key in
                        ("model", "base_url", "temperature", "top_p", "max_output_tokens", "reasoning_effort",
-                        "sampling_mode", "thinking", "pricing", "api_retry", "task_selection")):
+                        "sampling_mode", "thinking", "enable_thinking", "pricing", "api_retry", "task_selection")):
                     continue
                 if config.get("per_instance_cost_limit") != budget:
                     continue
@@ -677,6 +678,8 @@ def main():
     parser.add_argument("--per-instance", type=float, default=None)
     parser.add_argument("--total", type=float, default=None)
     parser.add_argument("--ids", nargs="+", default=None)
+    parser.add_argument("--skip-ids", nargs="+", default=None,
+                        help="Skip these cohort IDs for this invocation, including interrupted/problem tasks")
     parser.add_argument("--dry-run", action="store_true",
                         help="Show selected/skipped/pending IDs without Docker or model calls")
     parser.add_argument("--from-scratch", action="store_true",
@@ -730,6 +733,10 @@ def run_selected(records, args):
     allowed = set(selection["selected_ids"]) if selection else {r["id"] for r in records}
     if len(set(identifiers)) != len(identifiers) or not set(identifiers).issubset(allowed):
         raise ValueError("Selected IDs must be unique members of the configured challenge cohort")
+    excluded = set(getattr(args, "skip_ids", None) or [])
+    if not excluded.issubset(allowed):
+        raise ValueError("Skipped IDs must be members of the configured challenge cohort")
+    identifiers = [i for i in identifiers if i not in excluded]
     requested = list(identifiers)
     carried = set(selection["already_solved_ids"]) if selection else set()
     failed = set(selection.get("already_failed_ids", [])) if selection else set()
@@ -751,6 +758,7 @@ def run_selected(records, args):
                   "remaining_count": len(identifiers), "num_workers": min(args.num_workers, len(identifiers)),
                   "per_instance_cost_limit_usd": args.per_instance, "total_cost_limit_usd": args.total,
                   "pending_ids": identifiers, "skipped_ids": [i for i in requested if i in completed],
+                  "excluded_ids": sorted(excluded),
                   "categories": dict(Counter(r["category"] for r in records if r["id"] in identifiers)),
                   "task_selection": SETTINGS.get("task_selection")}
         GENERATED.mkdir(parents=True, exist_ok=True)
