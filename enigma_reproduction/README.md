@@ -137,12 +137,42 @@ bash enigma_reproduction/run_gpt54.sh --experiment gpt54-another-experiment
 保存的 `claude_settings.json` / `gemini_settings.json` / `deepseek_settings.json`；
 历史日志和原始结果保留。
 
-# 历史测试：Claude Sonnet 5 / x1api
+# 当前配置：Claude Sonnet 5 / x1api（DeepSeek 成功 82 题）
 
 主智能体和摘要模型均为 `claude-sonnet-5`，端点 `https://x1api.top/v1`，
-凭据读取 `X1API_API_KEY` 或权限 0600 的 `.secrets/x1api_api_key`，使用用户
-已切换分组的原密钥。每题预算 1.4 USD；默认三题试跑整批 4.2 USD；
+凭据读取 `CLAUDE_SONNET5_API_KEY` 或权限 0600 的 `.secrets/claude_sonnet5_api_key`。
+此次密钥独立保存，不覆盖其他模型的中转站密钥。每题预算 1.0 USD（主/摘要共用）；
+默认整批 82 USD、3 路并行；
 可读日志 `logs/claude-sonnet-5/`。
+
+固定 SHA256 的 `claude_sonnet5_deepseek82_tasks.json` 只选 DeepSeek 已成功的 82 题，
+不继承 Qwen/GPT 的成功或失败记录。实验 ID 为 `claude-sonnet5-deepseek82-restart-20261010T111904621215Z`；
+同一命令再次执行会跳过本实验已完成题，重新尝试中断题及 API/基础设施故障题。
+当前每题预算已从 0.8 调至 1.0 USD；旧 0.8 USD 记录不参与当前预算的续跑判断，
+因此 82 题重新测。之后保持 1.0 USD 时，正常按本轮已完成记录续跑。
+题目级续跑会从中断题的起点重新解题。普通单题错误记录后继续下一题。
+默认启动直接解题，不执行额外的模型连通性检查。
+
+```bash
+# 默认 3 路并行；Ctrl+C 后再次执行同一命令续跑。
+bash enigma_reproduction/run_claude_sonnet5.sh
+
+# 可选 2 或 4 路；每个 worker 使用独立进程、账本、日志和解题环境。
+bash enigma_reproduction/run_claude_sonnet5.sh --num-workers 2
+bash enigma_reproduction/run_claude_sonnet5.sh --num-workers 4
+
+# 跳过一个有问题的题；题目 ID 可从其日志头部查看。
+bash enigma_reproduction/run_claude_sonnet5.sh --skip-ids 题目ID
+
+# 仅预览选择，不发模型请求。
+bash enigma_reproduction/run_claude_sonnet5.sh --dry-run
+```
+
+解题容器、Compose 项目和网络逐题隔离；特殊 host 网络题取得排他锁。
+同一实验的第二个启动器被锁阻止，避免重复跑题；并发数通过 `--num-workers` 设置。
+`--skip-ids` 仅对当前启动生效，若仍要排除该题，续跑时保留同一参数。
+正常续跑不要加 `--from-scratch`。单次调用完成后按真实 usage 检查预算，最后一次
+调用可能超过每题阈值；82 USD 是本次启动预算，历史费用不会清零。
 
 沿用 OpenAI 兼容 Chat Completions，输出限制 4096 tokens。按
 [Sonnet 5 参数说明](https://platform.claude.com/docs/en/models/sonnet-5/overview)
@@ -153,11 +183,24 @@ bash enigma_reproduction/run_gpt54.sh --experiment gpt54-another-experiment
 估算：输入 2 USD、缓存读取 0.20 USD、输出 10 USD/M tokens；报告缓存写入时按
 5 分钟 2.50 / 1 小时 4 USD 记录范围。中转站实际价格尚未取得，预算与费用为参考估算。
 
-2026-10-09 验证：52 项离线测试通过，最小真实请求成功返回 `OK`（`claude-sonnet-5`，
+历史 2026-10-09 验证（原密钥与原配置）：52 项离线测试通过，最小真实请求成功返回 `OK`（`claude-sonnet-5`，
 输入 28 tokens、输出 4 tokens，约 17.68 秒）；用户授权后完成一次 ShreeRamQuest
 首轮输入对照（返回 `claude-sonnet-5`，未拒答，首个动作 `curl -i http://web.chal.csaw.io:80`，
 仅记录未执行）。诊断：`generated/sonnet5-connectivity.json`、
 `generated/sonnet5-ctf-check-20261009T141415151176Z/report.json`。
+原每题 1.4 USD 配置保存在 `claude_sonnet5_legacy_settings.json`，不会被此次续跑混用。
+
+2026-10-10 当前配置验证：116 项离线测试通过；2/3/4 路题目预览均为 82 题待运行，
+Docker 预检通过。此次新密钥的 3 个并发极短请求均返回 `OK`，约 8.84–9.38 秒，
+三次调用参考费用合计 0.0023844 USD；尚未启动本轮 82 题解题运行。
+报告：`generated/sonnet5-current-connectivity-20261010T110556980119Z/unsandboxed-report.json`，
+真实 usage：同目录 `unsandboxed-usage.jsonl`。该一次性验证不在启动脚本中执行。
+
+2026-10-10 首轮题目日志出现 `InvalidCacheUsage`：合成请求复现 x1api 在首次缓存写入
+时返回 `cached_tokens=null`。Sonnet 适配器已兼容该字段，按未命中价格计费用上限、
+记录原始数字字段与 `cache_hit_tokens_reported=false`；下限考虑未报告命中的可能折扣。
+详情与验证范围见 `CLAUDE_SONNET5_LOG_ANALYSIS.md`。此前校验失败的两题会自动重试，
+旧日志 token/已知费用为 0 不能解释为真实调用免费。
 
 # 历史测试：GPT-5.4 / x1api（早期端点，现已切换 TeamoRouter）
 
